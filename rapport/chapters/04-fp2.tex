@@ -208,6 +208,13 @@ Budget \etref{3}           & $\SI{31.25}{\micro\second}$ & $1/F_e$ \\
 \label{tab:fp2-timing}
 \end{table}
 
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\linewidth]{FP2/FP2Results.png}
+\caption{Extrait de la console série (18 secondes en continu) démontrant \etref{3} : \texttt{filter\_us\_avg} constant à \SI{11.29}{\micro\second}, \texttt{filter\_us\_max} stable entre \SI{14.27}{\micro\second} et \SI{14.64}{\micro\second}, \texttt{buf\_used} à 0 ou 1 sur 512 (aucune saturation), \texttt{Fe\_reelle} verrouillée à \SI{32012}{\hertz}.}
+\label{fig:fp2-timing-console}
+\end{figure}
+
 \paragraph{Historique des optimisations.} Quatre améliorations successives ont permis de passer de $\sim \SI{900}{\micro\second}$ (1\textsuperscript{re} tentative naïve) à $\SI{11}{\micro\second}$, soit un facteur $\times 80$ :
 
 \begin{enumerate}
