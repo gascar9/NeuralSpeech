@@ -298,7 +298,13 @@ void setup(void)
     Serial.begin(SERIAL_BAUDRATE);
     while (!Serial) {}
 
+#if defined(FP1_PURE) && (FP1_PURE == 1)
+    Serial.println("=== NeuralSpeech FP1 PURE — ADC 32 kHz + DAC brut (pas de filtre) ===");
+    Serial.println("*** Mode validation ET1 : DAC0 restitue le signal ADC brut ***");
+    Serial.println("*** Utiliser pour mesure Te oscillo + demo Nyquist.       ***");
+#else
     Serial.println("=== NeuralSpeech FP1+FP2 — ADC 32 kHz + filtre RIF + buf 8 kHz ===");
+#endif
     Serial.print("FE             : "); Serial.print(FE);              Serial.println(" Hz");
     Serial.print("FE_OUT         : "); Serial.print(FE_OUT);          Serial.println(" Hz");
     Serial.print("FILTER_TAPS    : "); Serial.print(FILTER_TAPS);     Serial.println("");
@@ -351,6 +357,15 @@ void loop(void)
         uint16_t rawSample = adcBuffer[tail];
         tail = (tail + 1) & BUFFER_MASK;
 
+#if defined(FP1_PURE) && (FP1_PURE == 1)
+        // ====================================================================
+        // Mode FP1 PURE : pas de filtrage, DAC restitue l'ADC brut.
+        // Objectif : validation ET1 oscilloscope (Te = 31.25 µs sur marches
+        // DAC) et démo repliement spectral à 17 kHz (alias à 15 kHz visible).
+        // ====================================================================
+        int16_t filtered = (int16_t)((int32_t)rawSample - (int32_t)ADC_MIDSCALE);
+        analogWrite(DAC_PIN, (uint32_t)rawSample);  // DAC = ADC brut direct
+#else
         // --- Mesure du temps de filtrage (ET3) ---
         uint32_t t0 = micros();
         int16_t filtered = filter_sample(rawSample);
@@ -370,6 +385,7 @@ void loop(void)
         if (dacVal < 0)    { dacVal = 0;    }
         if (dacVal > 4095) { dacVal = 4095; }
         analogWrite(DAC_PIN, (uint32_t)dacVal);
+#endif
 
         // --- Sous-échantillonnage /4 → buffer 8 kHz ---
         subsampleCounter++;
