@@ -1,186 +1,253 @@
 /**
- * NeuralSpeech — FP1 : Numérisation du signal audio (ET1)
+ * NeuralSpeech — FP1 + FP2 : Numérisation et conditionnement du signal audio
  *
- * Objectif : ADC 12 bits à Fe = 32 kHz, déclenchement par Timer Counter TC0-CH0,
- *            ISR ultra-courte, buffer circulaire, restitution via DAC0 pour validation
- *            oscilloscope, mesure de fréquence réelle via Serial.
+ * FP1 (ET1) : ADC 12 bits à Fe = 32 kHz, déclenchement par TC0-CH0.
+ *             Restitution DAC0 : signal filtré (pour validation oscilloscope FP2).
+ *
+ * FP2 (ET2, ET3) :
+ *   - Filtre RIF passe-bas 97 taps (Hamming, fc=3577 Hz, fc_design=-6dB)
+ *     atténuation >= 30 dB à 4 kHz (ET2).
+ *   - Implémenté dans la loop() via buffer circulaire dédié (pas dans l'ISR).
+ *   - Mesure du temps de filtrage via micros() — doit être < 31 µs (ET3).
+ *   - Sous-échantillonnage x4 : 1 échantillon filtré sur SUBSAMPLE_FACTOR
+ *     poussé dans le buffer audio 8 kHz (pour FP3/FP4).
+ *
+ * Choix ISR vs loop pour le filtrage :
+ *   On filtre dans la loop(), PAS dans l'ISR.
+ *   Justification : le filtre RIF à 97 taps représente ~97 MAC float.
+ *   Même si ~2.3 µs théoriques, on ne veut pas de risque d'ISR longue
+ *   (jitter, priorité) ni de double-buffering complexe. La loop() est
+ *   assez rapide pour consommer tous les échantillons entre deux ISR
+ *   (budget : 31.25 µs entre deux interruptions TC0).
  *
  * Board : Arduino Due (SAM3X8E, 84 MHz, 96 Kio SRAM)
  * Framework : PlatformIO + Arduino
  */
 
 #include <Arduino.h>
+#include "filter_coefs.h"   // FILTER_TAPS, FILTER_COEFS — généré par design_filter.py
 
 // ---------------------------------------------------------------------------
 // Constantes de configuration — aucun magic number ailleurs dans le code
 // ---------------------------------------------------------------------------
 
-/** Fréquence d'échantillonnage cible en Hz */
+/** Fréquence d'échantillonnage ADC cible en Hz */
 constexpr uint32_t FE = 32000;
+
+/** Facteur de sous-échantillonnage : 32 kHz -> 8 kHz */
+constexpr uint32_t SUBSAMPLE_FACTOR = 4;
+
+/** Fréquence de sortie après sous-échantillonnage */
+constexpr uint32_t FE_OUT = FE / SUBSAMPLE_FACTOR;   // = 8000 Hz
 
 /**
  * Taille du buffer circulaire ADC (puissance de 2 obligatoire).
  * 512 échantillons = 16 ms de signal à 32 kHz.
- * La SRAM du Due (96 Kio) absorbe facilement plusieurs buffers de cette taille.
  */
-constexpr uint32_t BUFFER_SIZE = 512;
-
-/** Masque pour l'arithmétique circulaire — remplace le modulo coûteux */
-constexpr uint32_t BUFFER_MASK = BUFFER_SIZE - 1;
+constexpr uint32_t BUFFER_SIZE      = 512;
+constexpr uint32_t BUFFER_MASK      = BUFFER_SIZE - 1;
 
 /**
- * Canal ADC correspondant à A0 sur l'Arduino Due.
- * A0 est mappé sur AD7 (canal 7) dans le hardware SAM3X8E.
+ * Taille du buffer circulaire 8 kHz (puissance de 2).
+ * 2048 échantillons = 256 ms à 8 kHz.
+ * Utilisé par FP3 (transfert série) et FP4 (MFCC).
+ * Taille en int16 : 2048 × 2 = 4 Kio (SRAM disponible : 96 Kio).
  */
-constexpr uint32_t ADC_CHANNEL = 7;       // AD7 = broche A0 du Due
+constexpr uint32_t BUF8K_SIZE       = 2048;
+constexpr uint32_t BUF8K_MASK       = BUF8K_SIZE - 1;
+
+/**
+ * Taille du buffer circulaire interne au filtre RIF.
+ * Doit être >= FILTER_TAPS. On prend la puissance de 2 supérieure
+ * pour pouvoir utiliser le masque à la place du modulo.
+ * FILTER_TAPS = 97 → puissance de 2 supérieure = 128.
+ */
+constexpr uint32_t FIR_BUF_SIZE     = 128;   // >= FILTER_TAPS (97), puissance de 2
+constexpr uint32_t FIR_BUF_MASK     = FIR_BUF_SIZE - 1;
+
+/** Canal ADC correspondant à A0 sur l'Arduino Due (AD7 = canal 7) */
+constexpr uint32_t ADC_CHANNEL      = 7;
 
 /** Broche DAC pour la restitution analogique (validation oscilloscope) */
-constexpr uint32_t DAC_PIN = DAC0;        // broche 66, DAC0 du SAM3X8E
+constexpr uint32_t DAC_PIN          = DAC0;
+
+/** Baudrate série */
+constexpr uint32_t SERIAL_BAUDRATE  = 250000;
 
 /**
- * Baudrate série — 250000 permet de transférer ~31 octets/sample à 32 kHz,
- * suffisant pour des messages de debug ponctuels (non continus).
+ * Prescaler TC : TIMER_CLOCK2 = MCK/8 = 10 500 000 Hz
+ * RC pour 32 kHz : 10 500 000 / 32 000 = 328.125 → 328
+ * Fe réelle = 10 500 000 / 328 = 32 012 Hz (erreur < 0.04 %)
  */
-constexpr uint32_t SERIAL_BAUDRATE = 250000;
+constexpr uint32_t TC_RC_VALUE      = 328;
 
 /**
- * Prescaler TC : TIMER_CLOCK2 = MCK/8 = 84 000 000 / 8 = 10 500 000 Hz
- * Valeur RC pour 32 kHz : 10 500 000 / 32 000 = 328.125 → arrondi à 328
- * Fe réelle = 10 500 000 / 328 = 32 012 Hz  (erreur < 0,04 %)
+ * Mise à l'échelle ADC -> DAC.
+ * ADC : 12 bits = 0..4095. DAC : 12 bits = 0..4095.
+ * Le filtre RIF travaille en float normalisé autour de 0 (valeur ADC centrée).
+ * Offset DC de l'ADC : 2048 (milieu de gamme 12 bits).
  */
-constexpr uint32_t TC_RC_VALUE = 328;
+constexpr float ADC_MIDSCALE        = 2048.0f;
+
+/** Nombre d'échantillons sur lesquels on moyennise le temps de filtrage */
+constexpr uint32_t TIMING_WINDOW    = 1000;
 
 // ---------------------------------------------------------------------------
-// Buffer circulaire partagé ISR ↔ loop
+// Buffer circulaire ADC (producteur = ISR, consommateur = loop)
 // ---------------------------------------------------------------------------
 
-/**
- * Buffer de stockage des échantillons ADC bruts (12 bits, valeurs 0–4095).
- * Déclaré volatile car modifié dans l'ISR et lu dans la loop.
- */
 volatile uint16_t adcBuffer[BUFFER_SIZE];
-
-/** Index d'écriture (producteur = ISR) */
 volatile uint32_t bufHead = 0;
-
-/** Index de lecture (consommateur = loop) */
 volatile uint32_t bufTail = 0;
 
 // ---------------------------------------------------------------------------
-// Variables de mesure de la fréquence réelle (debug)
+// Buffer circulaire 8 kHz (producteur = loop/filtre, consommateur = FP3/FP4)
 // ---------------------------------------------------------------------------
 
-/** Compteur d'échantillons pour mesurer Fe sur 1 seconde */
-volatile uint32_t sampleCount = 0;
+/**
+ * buf8k stocke les échantillons filtrés et sous-échantillonnés à 8 kHz.
+ * Format int16 : plage [-2048, +2047] (12 bits signés, centrés sur 0).
+ * Déclaré volatile car il sera lu/écrit depuis différents contextes
+ * (ici tout dans la loop, mais déclaration cohérente pour FP3).
+ */
+volatile int16_t  buf8k[BUF8K_SIZE];
+volatile uint32_t buf8kHead = 0;   // producteur (loop — filtrage)
+volatile uint32_t buf8kTail = 0;   // consommateur (FP3 — transfert série)
 
-/** Timestamp de la dernière mesure de fréquence (en µs) */
-uint32_t lastFreqMeasureUs = 0;
+// ---------------------------------------------------------------------------
+// Buffer circulaire interne du filtre RIF
+// ---------------------------------------------------------------------------
+
+/**
+ * firBuf est le registre à décalage du filtre RIF.
+ * firBufHead pointe sur la position où écrire le prochain échantillon.
+ * Le calcul de convolution parcourt FILTER_TAPS positions en arrière.
+ * Taille = FIR_BUF_SIZE (puissance de 2) pour masque & (N-1).
+ */
+static float   firBuf[FIR_BUF_SIZE];
+static uint32_t firBufHead = 0;
+
+// ---------------------------------------------------------------------------
+// Variables de mesure de fréquence réelle (FP1)
+// ---------------------------------------------------------------------------
+
+volatile uint32_t sampleCount      = 0;
+uint32_t          lastFreqMeasureUs = 0;
+
+// ---------------------------------------------------------------------------
+// Variables de mesure du temps de filtrage (FP2 — ET3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Mesure du temps de filter_sample() sur TIMING_WINDOW échantillons.
+ * Accumulation dans la loop, remise à zéro après affichage.
+ */
+static uint32_t timingCount       = 0;
+static uint32_t timingAccumUs     = 0;
+static uint32_t timingMaxUs       = 0;
 
 // ---------------------------------------------------------------------------
 // Prototypes
 // ---------------------------------------------------------------------------
 
-void configureTC0(void);
-void configureADC(void);
-void configureDAC(void);
+void     configureTC0(void);
+void     configureADC(void);
+void     configureDAC(void);
+float    filter_sample(uint16_t new_sample);
 
 // ---------------------------------------------------------------------------
 // ISR : Timer Counter 0 — canal 0
 // ---------------------------------------------------------------------------
 
 /**
- * TC0_Handler est appelé à Fe = 32 kHz par le TC0-CH0.
+ * TC0_Handler est appelé à Fe = 32 kHz par TC0-CH0.
  *
- * Règle : ISR ultra-courte.
- *  1. Lire le registre de statut du TC (efface le flag d'interruption).
- *  2. Déclencher une conversion ADC manuelle et attendre la fin.
- *  3. Pousser la valeur dans le buffer circulaire.
- *  4. Incrémenter le compteur de fréquence.
+ * RÈGLE : ISR ULTRA-COURTE.
+ * On fait uniquement :
+ *   1. Lecture TC_SR (efface le flag CPCS).
+ *   2. Déclenchement + attente conversion ADC (polling ~84 cycles).
+ *   3. Push dans adcBuffer.
+ *   4. Incrément du compteur de fréquence.
  *
- * Durée estimée : lecture ADC (≈20 cycles ADC @ 1 MHz ADC_CLK = 20 µs max)
- * → On configure l'ADC en mode déclenchement logiciel pour que la conversion
- *   se fasse entièrement dans l'ISR sans overhead d'une deuxième interruption.
- *
- * Note : On lit ADC_ISR pour attendre la fin de conversion (polling court,
- * acceptable car la conversion ADC 12 bits dure ~1 µs à 1 MHz ADC_CLK,
- * soit ~84 cycles CPU — bien en dessous du budget de 2600 cycles).
+ * Le filtrage est fait dans la loop() — pas ici.
  */
 void TC0_Handler(void)
 {
-    // Lire TC_SR efface automatiquement le flag CPCS (Compare RC Status)
-    // Sans cette lecture, l'ISR serait rappelée en boucle infinie.
     uint32_t status = TC0->TC_CHANNEL[0].TC_SR;
-    (void)status; // évite le warning "unused variable"
+    (void)status;
 
-    // Déclencher une conversion ADC sur le canal configuré
     ADC->ADC_CR = ADC_CR_START;
+    while (!(ADC->ADC_ISR & (1u << ADC_CHANNEL))) {}
 
-    // Attendre la fin de conversion du canal ADC_CHANNEL
-    // ADC_ISR_EOC7 = End Of Conversion canal 7 (A0)
-    while (!(ADC->ADC_ISR & (1u << ADC_CHANNEL))) { /* spin court ~84 cycles */ }
-
-    // Lire la valeur 12 bits (bits [11:0] du registre de données)
     uint16_t sample = (uint16_t)(ADC->ADC_CDR[ADC_CHANNEL] & 0x0FFF);
 
-    // Écriture dans le buffer circulaire avec masque (pas de modulo)
-    uint32_t nextHead = (bufHead + 1) & BUFFER_MASK;
-
-    // Détecter overflow (buffer plein) : on écrase le plus vieux échantillon
-    // plutôt que de bloquer — la loop doit consommer assez vite.
     adcBuffer[bufHead] = sample;
-    bufHead = nextHead;
+    bufHead = (bufHead + 1) & BUFFER_MASK;
 
-    // Compteur pour la mesure de fréquence réelle
     sampleCount++;
+}
+
+// ---------------------------------------------------------------------------
+// Filtre RIF — filter_sample()
+// ---------------------------------------------------------------------------
+
+/**
+ * Applique le filtre RIF passe-bas (FILTER_TAPS coefficients) à un nouvel
+ * échantillon ADC et retourne le résultat filtré en float.
+ *
+ * Implémentation : buffer circulaire de taille FIR_BUF_SIZE (puissance de 2).
+ *   - L'échantillon est centré autour de 0 avant filtrage (soustraction du DC).
+ *   - L'index firBufHead pointe sur la position la plus récente.
+ *   - La convolution parcourt FILTER_TAPS échantillons du plus récent au plus ancien.
+ *
+ * Complexité : FILTER_TAPS = 97 multiplications-accumulations (MAC) float.
+ * Coût théorique : 97 × 2 cycles = 194 cycles ≈ 2.3 µs @ 84 MHz.
+ * La mesure réelle (via micros()) est affichée dans le log [FP2] (ET3).
+ *
+ * @param new_sample  Valeur ADC brute 12 bits (0..4095)
+ * @return            Signal filtré en float (centré sur 0, même échelle)
+ */
+float filter_sample(uint16_t new_sample)
+{
+    // Centrage DC : on soustrait le point milieu 12 bits
+    float centered = (float)new_sample - ADC_MIDSCALE;
+
+    // Écriture dans le buffer circulaire RIF
+    firBuf[firBufHead] = centered;
+    firBufHead = (firBufHead + 1) & FIR_BUF_MASK;
+
+    // Convolution : y[n] = sum(h[k] * x[n-k], k=0..FILTER_TAPS-1)
+    // firBufHead pointe maintenant SUR la position APRÈS le dernier écrit,
+    // donc x[n] est à (firBufHead - 1) & FIR_BUF_MASK.
+    float acc   = 0.0f;
+    uint32_t idx = (firBufHead - 1) & FIR_BUF_MASK;  // x[n] = échantillon le plus récent
+
+    for (uint32_t k = 0; k < FILTER_TAPS; k++)
+    {
+        acc += FILTER_COEFS[k] * firBuf[idx];
+        idx  = (idx - 1) & FIR_BUF_MASK;   // & mask = pas de modulo coûteux
+    }
+
+    return acc;
 }
 
 // ---------------------------------------------------------------------------
 // Configuration du Timer Counter 0 — canal 0
 // ---------------------------------------------------------------------------
 
-/**
- * Configure TC0-CH0 en mode Waveform (génération de signal) avec Compare RC.
- * À chaque fois que le compteur atteint RC, il génère une interruption.
- * Cela produit une cadence exacte de Fe = MCK / (prescaler × RC).
- *
- * Registres SAM3X8E utilisés :
- *  - PMC_PCER0 : activation de l'horloge périphérique TC0 (ID = 27)
- *  - TC_CCR : Clock Control Register (enable + reset)
- *  - TC_CMR : Channel Mode Register (prescaler, mode waveform, CPCTRG)
- *  - TC_RC  : valeur de comparaison
- *  - TC_IER : Interrupt Enable Register (CPCS = Compare RC)
- */
 void configureTC0(void)
 {
-    // 1. Activer l'horloge du périphérique TC0 dans le PMC
-    //    TC0 = périphérique ID 27 selon le datasheet SAM3X8E p.38
     PMC->PMC_PCER0 = (1u << ID_TC0);
-
-    // 2. Désactiver le clock du canal avant configuration (évite comportement erratique)
     TC0->TC_CHANNEL[0].TC_CCR = TC_CCR_CLKDIS;
-
-    // 3. Configurer le mode du canal
-    //    - TCCLKS_TIMER_CLOCK2 : horloge MCK/8 = 10.5 MHz
-    //    - WAVE = 1            : mode Waveform (pas Capture)
-    //    - WAVSEL_UP_RC        : compteur UP, reset automatique quand compteur = RC
-    //    - ACPA/ACPC/etc.      : on ne gère pas la sortie TIOA pour ce projet
     TC0->TC_CHANNEL[0].TC_CMR =
-        TC_CMR_TCCLKS_TIMER_CLOCK2   // MCK/8 = 10 500 000 Hz
-        | TC_CMR_WAVE                 // mode Waveform
-        | TC_CMR_WAVSEL_UP_RC;        // reset sur Compare RC → fréquence fixe
-
-    // 4. Charger la valeur RC : Fe = 10 500 000 / 328 ≈ 32 012 Hz
-    TC0->TC_CHANNEL[0].TC_RC = TC_RC_VALUE;
-
-    // 5. Activer l'interruption sur Compare RC (CPCS)
+        TC_CMR_TCCLKS_TIMER_CLOCK2
+        | TC_CMR_WAVE
+        | TC_CMR_WAVSEL_UP_RC;
+    TC0->TC_CHANNEL[0].TC_RC  = TC_RC_VALUE;
     TC0->TC_CHANNEL[0].TC_IER = TC_IER_CPCS;
-    TC0->TC_CHANNEL[0].TC_IDR = ~TC_IER_CPCS; // s'assurer que les autres sont masquées
-
-    // 6. Activer le vecteur d'interruption TC0 dans le NVIC
+    TC0->TC_CHANNEL[0].TC_IDR = ~TC_IER_CPCS;
     NVIC_EnableIRQ(TC0_IRQn);
-    NVIC_SetPriority(TC0_IRQn, 0); // priorité maximale pour minimiser la gigue
-
-    // 7. Démarrer le compteur (Software Trigger = reset + enable)
+    NVIC_SetPriority(TC0_IRQn, 0);
     TC0->TC_CHANNEL[0].TC_CCR = TC_CCR_CLKEN | TC_CCR_SWTRG;
 }
 
@@ -188,60 +255,27 @@ void configureTC0(void)
 // Configuration de l'ADC
 // ---------------------------------------------------------------------------
 
-/**
- * Configure l'ADC du SAM3X8E pour la conversion sur A0 (canal 7).
- *
- * Paramètres clés :
- *  - Résolution : 12 bits
- *  - ADC_CLK cible : ~1 MHz (bien en dessous du max de 20 MHz)
- *    Prescaler = (MCK / (2 × ADC_CLK)) - 1 = (84 000 000 / 2 000 000) - 1 = 41
- *  - Mode : déclenchement logiciel (ADC_MR_TRGEN_DIS = pas de trigger hardware)
- *    Le déclenchement est fait manuellement dans l'ISR via ADC_CR_START.
- *  - Startup time : ADC_MR_STARTUP_SUT64 (64 périodes ADC_CLK)
- *  - Tracking time : ADC_MR_TRACKTIM minimum (0) — signal stable venant du MAX9814
- */
 void configureADC(void)
 {
-    // 1. Activer l'horloge du périphérique ADC (ID = 37 selon datasheet)
     PMC->PMC_PCER1 = (1u << (ID_ADC - 32));
-
-    // 2. Reset de l'ADC
-    ADC->ADC_CR = ADC_CR_SWRST;
-
-    // 3. Configurer le Mode Register
-    //    Prescaler : ADC_CLK = MCK / (2 × (PRESCAL + 1))
-    //    Pour ADC_CLK ≈ 1 MHz : PRESCAL = 84/2 - 1 = 41
-    ADC->ADC_MR =
-        ADC_MR_PRESCAL(41)            // ADC_CLK = 84 MHz / (2×42) ≈ 1 MHz
-        | ADC_MR_STARTUP_SUT64        // 64 cycles de startup (standard)
-        | ADC_MR_TRACKTIM(0)          // tracking time minimal (0+1 cycles)
-        | ADC_MR_SETTLING_AST3        // settling time 3 cycles
-        | ADC_MR_TRANSFER(1);         // transfer time 1+1 cycles
-
-    // Déclenchement logiciel (TRGEN = 0 par défaut = software trigger)
-    // Pas d'FREERUN — on contrôle chaque conversion depuis l'ISR du TC.
-
-    // 4. Activer uniquement le canal 7 (A0)
-    ADC->ADC_CHER = (1u << ADC_CHANNEL);
-
-    // 5. Désactiver toutes les interruptions ADC — on fait du polling dans l'ISR TC
-    ADC->ADC_IDR = 0xFFFFFFFF;
+    ADC->ADC_CR    = ADC_CR_SWRST;
+    ADC->ADC_MR    =
+        ADC_MR_PRESCAL(41)
+        | ADC_MR_STARTUP_SUT64
+        | ADC_MR_TRACKTIM(0)
+        | ADC_MR_SETTLING_AST3
+        | ADC_MR_TRANSFER(1);
+    ADC->ADC_CHER  = (1u << ADC_CHANNEL);
+    ADC->ADC_IDR   = 0xFFFFFFFF;
 }
 
 // ---------------------------------------------------------------------------
-// Configuration du DAC0 (validation oscilloscope)
+// Configuration du DAC0
 // ---------------------------------------------------------------------------
 
-/**
- * Configure DAC0 pour la restitution du signal numérisé.
- * Le DAC du SAM3X8E est 12 bits, sortie sur la broche DAC0 (broche 66 du Due).
- *
- * On utilise analogWrite() d'Arduino Due qui configure le DAC en 12 bits
- * automatiquement si on appelle analogWriteResolution(12) en setup().
- */
 void configureDAC(void)
 {
-    analogWriteResolution(12); // résolution DAC = 12 bits (0–4095)
+    analogWriteResolution(12);   // résolution DAC = 12 bits (0–4095)
 }
 
 // ---------------------------------------------------------------------------
@@ -250,101 +284,158 @@ void configureDAC(void)
 
 void setup(void)
 {
-    // Initialisation de la liaison série pour le debug
     Serial.begin(SERIAL_BAUDRATE);
-    while (!Serial) { /* attendre que le port soit prêt */ }
+    while (!Serial) {}
 
-    Serial.println("=== NeuralSpeech FP1 — ADC 32 kHz ===");
-    Serial.print("Fe cible       : "); Serial.print(FE);         Serial.println(" Hz");
-    Serial.print("Fe reelle      : "); Serial.print(10500000UL / TC_RC_VALUE); Serial.println(" Hz");
-    Serial.print("Buffer size    : "); Serial.print(BUFFER_SIZE); Serial.println(" samples");
-    Serial.println("Configuration ADC, TC, DAC...");
+    Serial.println("=== NeuralSpeech FP1+FP2 — ADC 32 kHz + filtre RIF + buf 8 kHz ===");
+    Serial.print("FE             : "); Serial.print(FE);              Serial.println(" Hz");
+    Serial.print("FE_OUT         : "); Serial.print(FE_OUT);          Serial.println(" Hz");
+    Serial.print("FILTER_TAPS    : "); Serial.print(FILTER_TAPS);     Serial.println("");
+    Serial.print("SUBSAMPLE      : 1/"); Serial.println(SUBSAMPLE_FACTOR);
+    Serial.print("BUF ADC        : "); Serial.print(BUFFER_SIZE);     Serial.println(" samples");
+    Serial.print("BUF 8kHz       : "); Serial.print(BUF8K_SIZE);      Serial.println(" samples (int16)");
+    Serial.print("FIR buf size   : "); Serial.print(FIR_BUF_SIZE);    Serial.println(" (puissance de 2)");
+    Serial.println("Configuration ADC, DAC, TC...");
 
-    // Configurer les périphériques dans l'ordre :
-    // 1. ADC (avant de démarrer le TC pour éviter une conversion sans canal actif)
+    // Initialiser le buffer RIF à zéro (silence initial)
+    for (uint32_t i = 0; i < FIR_BUF_SIZE; i++) { firBuf[i] = 0.0f; }
+
     configureADC();
-
-    // 2. DAC (pour la restitution oscilloscope)
     configureDAC();
-
-    // 3. TC0 (démarre le timer → les ISR commencent à arriver)
     configureTC0();
 
-    // Timestamp de référence pour la mesure de fréquence
     lastFreqMeasureUs = micros();
-
-    Serial.println("Demarrage acquisition...");
+    Serial.println("Demarrage acquisition + filtrage...");
 }
 
 // ---------------------------------------------------------------------------
-// loop() — consommateur du buffer, restitution DAC, debug fréquence
+// loop() — filtrage, sous-échantillonnage, DAC, debug
 // ---------------------------------------------------------------------------
 
 /**
- * La loop() lit les échantillons disponibles dans le buffer circulaire et les
- * écrit sur DAC0 pour permettre la validation oscilloscope (ET1).
+ * La loop() est le consommateur du buffer ADC et le producteur du buffer 8 kHz.
  *
- * Elle mesure aussi la fréquence réelle d'échantillonnage environ 1 fois/seconde
- * en comptant les échantillons produits par l'ISR.
+ * Pour chaque échantillon disponible dans adcBuffer :
+ *   1. Mesurer le temps avant filter_sample().
+ *   2. Appliquer le filtre RIF → signal filtré float.
+ *   3. Écrire le signal filtré sur DAC0 (validation oscilloscope ET2).
+ *   4. Sous-échantillonnage /4 : 1 sample sur SUBSAMPLE_FACTOR →
+ *      convertir en int16 et pousser dans buf8k.
+ *   5. Accumuler les statistiques de timing pour le log [FP2].
  *
- * IMPORTANT : pas de delay(), pas de Serial dans le chemin critique.
- * Le Serial.print de debug est déclenché seulement toutes les ~8000 itérations,
- * ce qui correspond à ~1 seconde à 32 kHz.
+ * Pas de delay(). Pas de double().
  */
 void loop(void)
 {
-    // --- Consommation du buffer et restitution DAC ---
+    // Compteur pour le sous-échantillonnage (persistant entre itérations)
+    static uint32_t subsampleCounter = 0;
 
-    // Lire les indices de façon atomique (uint32_t, lecture 32 bits = atomique sur ARM)
-    uint32_t head = bufHead;
+    // --- Consommation du buffer ADC et filtrage ---
+
+    uint32_t head = bufHead;   // lecture atomique (32 bits ARM)
     uint32_t tail = bufTail;
 
     while (tail != head)
     {
-        // Lire l'échantillon 12 bits depuis le buffer circulaire
-        uint16_t sample = adcBuffer[tail];
-
-        // Avancer l'index de lecture avec masque (pas de modulo)
+        uint16_t rawSample = adcBuffer[tail];
         tail = (tail + 1) & BUFFER_MASK;
 
-        // Écrire sur DAC0 : la tension de sortie reproduit le signal ADC
-        // Le DAC du Due accepte des valeurs 0–4095 en résolution 12 bits
-        analogWrite(DAC_PIN, sample);
+        // --- Mesure du temps de filtrage (ET3) ---
+        uint32_t t0 = micros();
+        float filtered = filter_sample(rawSample);
+        uint32_t t1 = micros();
+
+        uint32_t elapsed = (t1 >= t0) ? (t1 - t0) : 0u;   // protection wrap-around
+
+        timingAccumUs += elapsed;
+        if (elapsed > timingMaxUs) { timingMaxUs = elapsed; }
+        timingCount++;
+
+        // --- Restitution DAC0 : signal filtré (validation oscilloscope FP2) ---
+        // Reconversion float -> 12 bits : on ajoute le DC puis on sature
+        float dacVal = filtered + ADC_MIDSCALE;
+        if (dacVal < 0.0f)    { dacVal = 0.0f;    }
+        if (dacVal > 4095.0f) { dacVal = 4095.0f; }
+        analogWrite(DAC_PIN, (uint32_t)dacVal);
+
+        // --- Sous-échantillonnage /4 → buffer 8 kHz ---
+        subsampleCounter++;
+        if (subsampleCounter >= SUBSAMPLE_FACTOR)
+        {
+            subsampleCounter = 0;
+
+            // Conversion float [-2048, +2047] → int16_t
+            int32_t s16val = (int32_t)filtered;
+            if (s16val < -2048) { s16val = -2048; }
+            if (s16val >  2047) { s16val =  2047; }
+
+            buf8k[buf8kHead] = (int16_t)s16val;
+            buf8kHead = (buf8kHead + 1) & BUF8K_MASK;
+            // Note : pas de protection overflow ici — FP3 doit consommer
+            // assez vite. Un overflow écrase silencieusement le plus vieux
+            // échantillon (même comportement que buf ADC).
+        }
     }
 
     // Mettre à jour l'index de lecture (une seule écriture volatile à la fin)
     bufTail = tail;
 
-    // --- Mesure de la fréquence réelle (~1 fois par seconde) ---
+    // --- Mesure de fréquence réelle + log FP1/FP2 (~1 fois/seconde) ---
 
     uint32_t nowUs = micros();
-
-    // Déclencher la mesure toutes les secondes environ (1 000 000 µs)
     if ((nowUs - lastFreqMeasureUs) >= 1000000UL)
     {
-        // Lire et remettre à zéro le compteur d'échantillons de façon atomique
-        // On désactive brièvement l'interruption TC0 pour éviter une race condition
+        // Lire + reset sampleCount de façon atomique
         NVIC_DisableIRQ(TC0_IRQn);
         uint32_t count = sampleCount;
-        sampleCount = 0;
+        sampleCount    = 0;
         NVIC_EnableIRQ(TC0_IRQn);
 
-        // Calculer la fréquence réelle en Hz sur l'intervalle écoulé
         uint32_t elapsedUs = nowUs - lastFreqMeasureUs;
         uint32_t feReelle  = (uint32_t)((uint64_t)count * 1000000UL / elapsedUs);
+        uint32_t bufOccup  = (bufHead - bufTail) & BUFFER_MASK;
 
-        // Calcul du niveau d'occupation du buffer (pour détecter un overflow)
-        uint32_t occupation = (bufHead - bufTail) & BUFFER_MASK;
-
-        // Affichage debug — une seule ligne par seconde, compact pour 250 kBaud
+        // Log FP1
         Serial.print("[FP1] Fe_reelle=");
         Serial.print(feReelle);
         Serial.print(" Hz | samples=");
         Serial.print(count);
         Serial.print(" | buf_used=");
-        Serial.print(occupation);
+        Serial.print(bufOccup);
         Serial.print("/");
         Serial.println(BUFFER_SIZE);
+
+        // Log FP2 (ET3)
+        if (timingCount > 0)
+        {
+            // Calcul en virgule fixe entière pour éviter les float dans le log
+            // On multiplie par 100 pour obtenir des centièmes de µs
+            uint32_t avgUs_x100 = (timingAccumUs * 100UL) / timingCount;
+            uint32_t avgInt     = avgUs_x100 / 100;
+            uint32_t avgFrac    = avgUs_x100 % 100;
+
+            uint32_t maxUs_x100 = timingMaxUs * 100UL;
+            uint32_t maxInt     = maxUs_x100 / 100;
+            uint32_t maxFrac    = maxUs_x100 % 100;
+
+            uint32_t buf8kUsed  = (buf8kHead - buf8kTail) & BUF8K_MASK;
+
+            Serial.print("[FP2] filter_us_avg=");
+            Serial.print(avgInt); Serial.print("."); Serial.print(avgFrac);
+            Serial.print(" max=");
+            Serial.print(maxInt); Serial.print("."); Serial.print(maxFrac);
+            Serial.print(" | buf8k_used=");
+            Serial.print(buf8kUsed);
+            Serial.print("/");
+            Serial.print(BUF8K_SIZE);
+            Serial.print(" | taps=");
+            Serial.println(FILTER_TAPS);
+
+            // Reset des accumulateurs de timing
+            timingCount   = 0;
+            timingAccumUs = 0;
+            timingMaxUs   = 0;
+        }
 
         lastFreqMeasureUs = nowUs;
     }

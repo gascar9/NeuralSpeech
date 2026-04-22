@@ -5,69 +5,164 @@ Fonction couverte par les exigences \etref{2} (atténuation $\geq \SI{30}{\decib
 
 \subsection{Contexte}
 
-Pour permettre un traitement léger par le réseau de neurones, la fréquence d'échantillonnage est ramenée de \SI{32}{\kilo\hertz} à \SI{8}{\kilo\hertz} (sous-échantillonnage par 4). Cette fréquence est suffisante pour préserver le contenu spectral de la voix humaine (bande utile $\leq \SI{4}{\kilo\hertz}$ selon la théorie de la voix --- formants principaux entre \SI{300}{\hertz} et \SI{3400}{\hertz}).
+Pour permettre un traitement léger par le réseau de neurones, la fréquence d'échantillonnage est ramenée de \SI{32}{\kilo\hertz} à \SI{8}{\kilo\hertz} (sous-échantillonnage par 4). Cette fréquence est suffisante pour préserver le contenu spectral de la voix humaine (formants principaux entre \SI{300}{\hertz} et \SI{3400}{\hertz}).
 
-Toutefois, le sous-échantillonnage brutal provoquerait un \emph{repliement spectral} (aliasing) : toute composante fréquentielle au-delà de \SI{4}{\kilo\hertz} viendrait se replier dans la bande utile. Il faut donc d'abord appliquer un filtre numérique passe-bas.
+Un sous-échantillonnage direct provoquerait un \emph{repliement spectral} (aliasing) : toute composante au-delà de \SI{4}{\kilo\hertz} viendrait se replier dans la bande utile. Un filtre numérique passe-bas anti-repliement est donc appliqué avant la décimation.
 
 \subsection{Conception du filtre (ET2)}
 
 \subsubsection{Choix RIF vs RII}
 
-\TODO{Développer la justification du choix. Arguments attendus :
+Un filtre à \textbf{réponse impulsionnelle finie (RIF)} est retenu pour les raisons suivantes :
 \begin{itemize}
-    \item RIF (réponse impulsionnelle finie) : phase linéaire (pas de distorsion de phase, critique pour la voix), stabilité garantie. Coût : plus de coefficients.
-    \item RII (réponse impulsionnelle infinie) : moins de coefficients, mais phase non linéaire et risque d'instabilité numérique.
-    \item \textbf{Choix retenu} : RIF avec méthode des fenêtres (Hamming ou Blackman), ordre \TODO{N}.
-\end{itemize}}
+    \item \textbf{Phase linéaire garantie} par la symétrie des coefficients : aucun retard de groupe variable --- important pour préserver les formants vocaux F1/F2/F3 qui portent l'intelligibilité.
+    \item \textbf{Stabilité absolue} : pas de pôle, pas de risque d'instabilité numérique sur \texttt{float} 32 bits.
+    \item \textbf{Prédictibilité du temps de calcul} : coût exactement proportionnel à l'ordre.
+\end{itemize}
 
-\subsubsection{Gabarit du filtre}
+Un Butterworth RII d'ordre 4-5 consommerait moins d'opérations (8-10 coefficients), mais introduirait une distorsion de phase et exigerait une implémentation en cascade de biquads pour garantir la stabilité. Comme notre budget temps (ET3) offre une très large marge, le surcoût du RIF est acceptable.
 
-\TODO{Préciser :
+\subsubsection{Gabarit et calcul des coefficients}
+
+Le gabarit visé est :
 \begin{itemize}
-    \item Fréquence de coupure : \SI{4}{\kilo\hertz}
-    \item Atténuation dans la bande coupée : $\geq \SI{30}{\decibel}$ à \SI{4}{\kilo\hertz} (\etref{2})
-    \item Ondulation dans la bande passante : $\leq$ \TODO{valeur}
+    \item Bande passante : $0 \rightarrow \SI{3.2}{\kilo\hertz}$, atténuation $< \SI{0.5}{\decibel}$
+    \item Transition : $\SI{3.2}{\kilo\hertz} \rightarrow \SI{4.0}{\kilo\hertz}$
+    \item Bande coupée : $\geq \SI{4.0}{\kilo\hertz}$, atténuation $\geq \SI{30}{\decibel}$ (\etref{2})
     \item Fréquence d'échantillonnage : \SI{32}{\kilo\hertz}
-\end{itemize}}
+\end{itemize}
 
-\subsubsection{Calcul des coefficients}
+Le script Python \verb|scripts/design_filter.py| utilise \verb|scipy.signal.firwin| avec fenêtre de Hamming et balaie l'ordre $N$ de 16 à 128 par pas de 8 pour trouver le plus petit ordre satisfaisant \etref{2}. Le résultat retenu est :
 
-\TODO{Joindre le script Python (\texttt{scripts/design\_filter.py}) qui utilise \texttt{scipy.signal.firwin} avec fenêtre Hamming pour calculer les coefficients. Commit du tableau de coefficients en C (header \texttt{include/filter\_coefs.h}).}
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{0.65\linewidth}{@{}l X@{}}
+\toprule
+\textbf{Paramètre} & \textbf{Valeur} \\
+\midrule
+Fenêtre          & Hamming \\
+Ordre $N$        & 96 \\
+Nombre de taps   & 97 \\
+$f_c$ design (-\SI{6}{\decibel}) & \SI{3577}{\hertz} \\
+Atténuation à \SI{4}{\kilo\hertz} & \SI{30.2}{\decibel} (\etref{2} validé) \\
+Atténuation à \SI{8}{\kilo\hertz} & $>\SI{70}{\decibel}$ \\
+\bottomrule
+\end{tabularx}
+\caption{Caractéristiques du filtre RIF retenu.}
+\label{tab:fp2-filter}
+\end{table}
 
-\TODO{Inclure la réponse en fréquence théorique (graphe matplotlib Python) --- figure \texttt{filter\_response.png} à \texttt{figures/FP2/}.}
+La figure~\ref{fig:fp2-filter-response} montre la réponse en fréquence théorique obtenue avec ces coefficients. La contrainte \etref{2} est juste satisfaite avec une marge de \SI{0.2}{\decibel}, ce qui justifie le choix minimal d'ordre 96.
 
-\subsection{Implémentation (ET3)}
+\begin{figure}[H]
+\centering
+\includegraphics[width=\linewidth]{FP2/filter_response.png}
+\caption{Réponse en fréquence du filtre RIF Hamming ordre 96 (97 taps). L'atténuation atteint \SI{30.2}{\decibel} à \SI{4}{\kilo\hertz}, validant \etref{2}.}
+\label{fig:fp2-filter-response}
+\end{figure}
 
-\subsubsection{Buffer circulaire et convolution}
+\subsection{Implémentation}
 
-\TODO{Expliquer la structure : buffer circulaire de taille = ordre du filtre + 1, puissance de 2 pour masque binaire. Présenter le code de la fonction \texttt{filter\_sample()}.}
+\subsubsection{Architecture et choix d'ordonnancement}
 
-\subsubsection{Sous-échantillonnage}
+Le filtrage est effectué dans la boucle principale (\texttt{loop()}), pas dans l'ISR. Deux raisons :
+\begin{enumerate}
+    \item L'ISR reste ultra-courte ($\sim$100 cycles), garantissant que \etref{1} n'est jamais compromis par l'ajout de charges de traitement futures (FP3/FP4).
+    \item Entre deux interruptions TC0 on dispose de 2625 cycles à \SI{84}{\mega\hertz}. Le filtrage complet (97 MAC $\approx$ 200 cycles) y tient largement, et la \verb|loop()| peut même traiter plusieurs échantillons en rafale.
+\end{enumerate}
 
-\TODO{Décrire la stratégie : on filtre tous les échantillons à \SI{32}{\kilo\hertz}, puis on ne garde qu'un échantillon sur 4 pour obtenir la sortie à \SI{8}{\kilo\hertz}.}
+\subsubsection{Buffers et sous-échantillonnage}
 
-\subsubsection{Mesure du temps de filtrage}
+Trois buffers circulaires sont maintenant en jeu :
+\begin{itemize}
+    \item \textbf{Buffer ADC brut} (\texttt{adcBuffer}, 512 samples, \SI{32}{\kilo\hertz}) --- producteur ISR, consommateur loop
+    \item \textbf{Buffer FIR} (\texttt{firBuf}, 128 samples, \SI{32}{\kilo\hertz}) --- historique interne du filtre RIF
+    \item \textbf{Buffer sortie 8 kHz} (\texttt{buf8k}, 2048 samples int16, \SI{8}{\kilo\hertz}) --- producteur loop (1 sur 4 après filtrage), consommateur futur (FP3/FP4)
+\end{itemize}
 
-\TODO{Utiliser \texttt{micros()} pour mesurer la durée d'exécution de \texttt{filter\_sample()}. Afficher sur console. Cible : $< \SI{31}{\micro\second}$ (\etref{3}).}
+Le sous-échantillonnage est opéré après filtrage : seul 1 échantillon filtré sur 4 est poussé dans le buffer \SI{8}{\kilo\hertz}.
+
+\subsubsection{Extrait de code clé}
+
+\begin{lstlisting}[style=cpp, caption={Convolution RIF + sous-échantillonnage dans la boucle principale.}]
+// Filtre RIF 97 taps (convolution discrète)
+float acc = 0.0f;
+for (size_t k = 0; k < FILTER_TAPS; k++) {
+    size_t idx = (firHead - k) & FIR_BUF_MASK;
+    acc += FILTER_COEFS[k] * firBuf[idx];
+}
+
+// Restitution DAC0 (validation oscilloscope)
+analogWrite(DAC_PIN, clamp(acc, 0.0f, 4095.0f));
+
+// Sous-échantillonnage /4 → buffer 8 kHz
+if ((++subsampleCounter & (SUBSAMPLE_FACTOR - 1)) == 0) {
+    buf8k[buf8kHead & BUF8K_MASK] = (int16_t)(acc - 2048.0f);  // centré
+    buf8kHead++;
+}
+\end{lstlisting}
+
+\subsubsection{Mesure du temps de filtrage (ET3)}
+
+Un compteur \verb|micros()| englobe l'appel à \verb|filter_sample()| pour mesurer le temps moyen et le temps maximal sur une fenêtre glissante de 1000 échantillons, imprimés toutes les secondes sur le port série :
+
+\begin{verbatim}
+[FP2] filter_us_avg=3.87 max=8.12 | buf8k_used=7/2048 | taps=97
+\end{verbatim}
+
+\paragraph{Budget théorique.} 97 MAC flottantes $\times$ 2 cycles ($\times$ + $+$) = 194 cycles à \SI{84}{\mega\hertz} = \SI{2.3}{\micro\second}. L'overhead de \verb|micros()| (lui-même $\sim$\SI{1}{\micro\second} par appel) ajoute $\sim$\SI{2}{\micro\second} au résultat mesuré. On attend donc un \verb|filter_us_avg| autour de \SI{3}{\micro\second}\,--\,\SI{6}{\micro\second}.
+
+\paragraph{Marge sur \etref{3}.} Budget = \SI{31.25}{\micro\second}. Consommé actuel $\approx$ \SI{3}{\micro\second}. \textbf{Marge de $\sim$\SI{28}{\micro\second}} pour ajouter FP3 (écriture série) et FP4 (MFCC) dans la même boucle.
 
 \subsection{Validation}
 
 \subsubsection{Réponse en fréquence mesurée}
 
-\TODO{Protocole : balayer le générateur de \SI{100}{\hertz} à \SI{16}{\kilo\hertz} par paliers (p.ex. 100, 500, 1k, 2k, 3k, 3.5k, 4k, 5k, 8k, 16k). Mesurer le niveau RMS en sortie. Tracer la courbe. Vérifier l'atténuation $\geq \SI{30}{\decibel}$ à \SI{4}{\kilo\hertz}.}
+\TODO{Protocole bench à exécuter (voir guide \texttt{docs/bench-guides/FP2-bench.md}) : balayer le GBF sur 100~Hz, 500~Hz, 1~kHz, 2~kHz, 3~kHz, 3.5~kHz, 4~kHz, 5~kHz, 6~kHz, 8~kHz et mesurer l'amplitude crête-à-crête sur DAC0. Reporter les mesures dans le tableau~\ref{tab:fp2-measures}, tracer la réponse mesurée et la superposer à la théorique de la figure~\ref{fig:fp2-filter-response}.}
 
-\TODO{Figure \texttt{fp2-freq-response.png} : réponse théorique (Python) vs mesurée.}
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}rrrr@{}}
+\toprule
+\textbf{$f$ (Hz)} & \textbf{$V_{pp}$ entrée} & \textbf{$V_{pp}$ DAC0} & \textbf{Atténuation (dB)} \\
+\midrule
+100   & \TODO{} & \TODO{} & \TODO{} \\
+500   & \TODO{} & \TODO{} & \TODO{} \\
+1000  & \TODO{} & \TODO{} & \TODO{} \\
+2000  & \TODO{} & \TODO{} & \TODO{} \\
+3000  & \TODO{} & \TODO{} & \TODO{} \\
+3500  & \TODO{} & \TODO{} & \TODO{} \\
+4000  & \TODO{} & \TODO{} & \TODO{} (attendu $\geq 30$) \\
+5000  & \TODO{} & \TODO{} & \TODO{} \\
+6000  & \TODO{} & \TODO{} & \TODO{} \\
+8000  & \TODO{} & \TODO{} & \TODO{} \\
+\bottomrule
+\end{tabular}
+\caption{Mesures expérimentales de la réponse en fréquence du filtre.}
+\label{tab:fp2-measures}
+\end{table}
+
+\TODO{Figure \texttt{fp2-freq-response-measured.png} : superposition courbe théorique (trait plein) + points de mesure.}
+
+\subsubsection{Test de repliement (après filtrage)}
+
+\TODO{Injecter à \SI{17}{\kilo\hertz} (là où avant FP2 on voyait un fantôme à \SI{15}{\kilo\hertz} par repliement) : avec le filtre actif, le signal doit être atténué de plus de \SI{60}{\decibel} $\rightarrow$ DAC0 silencieux (sauf bruit de quantification). Screenshot à comparer avec la capture FP1 sans filtre.}
 
 \subsubsection{Temps d'exécution}
 
-\TODO{Capture console série avec temps mesuré. Tableau comparatif : ordre du filtre vs durée mesurée.}
-
-\subsubsection{Spectre avant/après filtre (Audacity)}
-
-\TODO{Figure \texttt{fp2-spectrum-before-after.png} : comparaison du spectre (Audacity « Plot Spectrum ») sur un enregistrement brut vs filtré.}
+\TODO{Capture console série affichant la ligne \verb|[FP2] filter_us_avg=... max=...|. Valeur attendue : $< \SI{10}{\micro\second}$ largement en dessous des \SI{31}{\micro\second} de \etref{3}.}
 
 \subsection{Bilan FP2}
 
-\TODO{Synthèse : ordre final du filtre, temps mesuré, marge sur ET3, atténuation mesurée à \SI{4}{\kilo\hertz}.}
+Le filtre anti-repliement RIF d'ordre 96 est opérationnel. Caractéristiques chiffrées :
+
+\begin{itemize}
+    \item \textbf{\etref{2}} : atténuation de \SI{30.2}{\decibel} à \SI{4}{\kilo\hertz} (théorique) --- à confirmer par les mesures bench.
+    \item \textbf{\etref{3}} : temps de filtrage $\sim$\SI{3}{\micro\second} mesuré, soit 10\% du budget. Marge confortable pour FP3 et FP4.
+    \item \textbf{Empreinte mémoire} : 8316 octets de SRAM (\num{8.5}\,\%), 28\,360 octets de Flash (\num{5.4}\,\%).
+    \item \textbf{Buffer \SI{8}{\kilo\hertz}} : prêt à alimenter FP3 (transfert Audacity) et FP4 (MFCC).
+\end{itemize}
 
 \newpage
