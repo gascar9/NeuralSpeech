@@ -1,67 +1,45 @@
 /**
- * filter_coefs.h -- Coefficients RIF passe-bas anti-repliement
+ * filter_coefs.h -- Coefficients RIF passe-bas anti-repliement (FP2, ET2)
  *
- * Genere automatiquement par scripts/design_filter.py
- * NE PAS MODIFIER MANUELLEMENT -- relancer design_filter.py
+ * Source : http://t-filter.engineerjs.com (Parks-McClellan / Remez exchange)
  *
- * Fenetre   : Hamming
- * Ordre     : 96  (97 taps)
- * Fe        : 32000 Hz
- * fc_design : 3577 Hz  (point -6 dB)
- * f_pass    : 3200 Hz  (fin bande passante)
- * f_stop    : 4000 Hz  (debut bande attenuee)
- * Att @ f_stop : 30.2 dB  (ET2 : >= 30.0 dB)
+ * Gabarit de conception :
+ *   - Fe            : 32000 Hz
+ *   - Bande passante: 0 - 3200 Hz     gain = 1, ripple desire 0.5 dB
+ *   - Bande coupee  : 4000 - 16000 Hz gain = 0, attenuation desiree >= 30 dB (ET2)
+ *   - Precision     : 16 bits fixed-point (Q15 implicite, somme ~= 32768)
+ *
+ * Le filtre Parks-McClellan est "equiripple optimal" : pour un gabarit donne,
+ * il donne le nombre de taps minimum. Ici 59 taps (contre 97 pour notre premier
+ * design methode des fenetres Hamming) -- reduction de ~40% du cout CPU.
+ *
+ * Coefficients symetriques (phase lineaire garantie), centre a l'indice 29.
+ *
+ * NE PAS MODIFIER MANUELLEMENT -- regenerer via http://t-filter.engineerjs.com
  */
 
 #pragma once
 #include <stddef.h>
+#include <stdint.h>
 
-constexpr size_t FILTER_TAPS = 97U;
+/** Nombre total de coefficients (taps) du filtre RIF */
+constexpr size_t FILTER_TAPS = 59U;
 
-// Q15 fixed-point (utilise en runtime — MAC entier, pas de FPU)
-// coef_q15[k] = round(coef_float[k] * 32767), sature dans [-32768, 32767]
-// Dynamique accumulateur int32 : pire cas = 122729932 (marge x17.50 avant overflow)
+/**
+ * Coefficients en Q15 (int16 signes).
+ * Convolution : acc (int32) = sum( FILTER_COEFS_Q15[k] * x[n-k] )
+ * Sortie signal : y = acc >> 15
+ *
+ * Dynamique : somme des |coefs| ~= 50000, acc_max ~= 50000 * 2048 = 1.02e8,
+ * largement sous INT32_MAX = 2.15e9 (marge x20).
+ */
 constexpr int16_t FILTER_COEFS_Q15[FILTER_TAPS] = {
-    13, 18, 15, 4, -11, -24, -27, -16,
-    7, 33, 48, 41, 9, -37, -76, -83,
-    -47, 25, 101, 141, 114, 20, -107, -204,
-    -214, -111, 72, 256, 342, 265, 31, -267,
-    -487, -495, -242, 196, 631, 832, 636, 40,
-    -753, -1388, -1472, -735, 836, 2959, 5116, 6723,
-    7316, 6723, 5116, 2959, 836, -735, -1472, -1388,
-    -753, 40, 636, 832, 631, 196, -242, -495,
-    -487, -267, 31, 265, 342, 256, 72, -111,
-    -214, -204, -107, 20, 114, 141, 101, 25,
-    -47, -83, -76, -37, 9, 41, 48, 33,
-    7, -16, -27, -24, -11, 4, 15, 18,
-    13
-};
-
-// Float (reference debug uniquement — non utilise en runtime)
-constexpr float FILTER_COEFS[FILTER_TAPS] = {
-    0.0003963362f, 0.0005476256f, 0.0004514226f, 0.0001182066f,
-    -0.0003391817f, -0.0007236405f, -0.0008187530f, -0.0004924387f,
-    0.0002022271f, 0.0009920955f, 0.0014643581f, 0.0012575733f,
-    0.0002863327f, -0.0011251441f, -0.0023091099f, -0.0025398987f,
-    -0.0014325239f, 0.0007482437f, 0.0030705871f, 0.0042927915f,
-    0.0034813677f, 0.0006014046f, -0.0032584389f, -0.0062319960f,
-    -0.0065237393f, -0.0033983370f, 0.0021991660f, 0.0078028208f,
-    0.0104331409f, 0.0080788730f, 0.0009575442f, -0.0081519404f,
-    -0.0148536841f, -0.0151049000f, -0.0073884935f, 0.0059824254f,
-    0.0192474542f, 0.0253911410f, 0.0194032981f, 0.0012345024f,
-    -0.0229932983f, -0.0423633460f, -0.0449104540f, -0.0224374009f,
-    0.0255144762f, 0.0902892552f, 0.1561471697f, 0.2051661331f,
-    0.2232774926f, 0.2051661331f, 0.1561471697f, 0.0902892552f,
-    0.0255144762f, -0.0224374009f, -0.0449104540f, -0.0423633460f,
-    -0.0229932983f, 0.0012345024f, 0.0194032981f, 0.0253911410f,
-    0.0192474542f, 0.0059824254f, -0.0073884935f, -0.0151049000f,
-    -0.0148536841f, -0.0081519404f, 0.0009575442f, 0.0080788730f,
-    0.0104331409f, 0.0078028208f, 0.0021991660f, -0.0033983370f,
-    -0.0065237393f, -0.0062319960f, -0.0032584389f, 0.0006014046f,
-    0.0034813677f, 0.0042927915f, 0.0030705871f, 0.0007482437f,
-    -0.0014325239f, -0.0025398987f, -0.0023091099f, -0.0011251441f,
-    0.0002863327f, 0.0012575733f, 0.0014643581f, 0.0009920955f,
-    0.0002022271f, -0.0004924387f, -0.0008187530f, -0.0007236405f,
-    -0.0003391817f, 0.0001182066f, 0.0004514226f, 0.0005476256f,
-    0.0003963362f
+      189,    509,   -107,    -45,   -226,   -239,   -160,     30,
+      238,    360,    314,     90,   -227,   -484,   -534,   -306,
+      136,    603,    851,    694,    112,   -702,  -1381,  -1514,
+     -807,    767,   2926,   5138,   6790,   7402,   6790,   5138,
+     2926,    767,   -807,  -1514,  -1381,   -702,    112,    694,
+      851,    603,    136,   -306,   -534,   -484,   -227,     90,
+      314,    360,    238,     30,   -160,   -239,   -226,    -45,
+     -107,    509,    189
 };
