@@ -4,16 +4,21 @@
  * Source : http://t-filter.engineerjs.com (Parks-McClellan / Remez exchange)
  *
  * Gabarit de conception :
- *   - Fe            : 32000 Hz
- *   - Bande passante: 0 - 3200 Hz     gain = 1, ripple desire 0.5 dB
- *   - Bande coupee  : 4000 - 16000 Hz gain = 0, attenuation desiree >= 30 dB (ET2)
- *   - Precision     : 16 bits fixed-point (Q15 implicite, somme ~= 32768)
+ *   - Fe                : 32000 Hz
+ *   - Bande passante    : 0 - 2800 Hz    gain = 1, ripple desire 5 dB (actual ~1.1 dB)
+ *   - Bande coupee      : 4000 - 16000 Hz gain = 0, attenuation -30 dB (actual -41.5 dB, ET2 OK +11.5 dB marge)
+ *   - Precision         : 16 bits fixed-point (Q15 implicite, >> 15 en runtime)
  *
- * Le filtre Parks-McClellan est "equiripple optimal" : pour un gabarit donne,
- * il donne le nombre de taps minimum. Ici 59 taps (contre 97 pour notre premier
- * design methode des fenetres Hamming) -- reduction de ~40% du cout CPU.
+ * Nombre de taps : 40 (contre 97 avec la methode des fenetres Hamming et 59 avec
+ * un gabarit 0-3200 Hz). Parks-McClellan sur un gabarit plus large offre la
+ * reduction de cout CPU la plus agressive tout en gardant ET2 largement respectee.
  *
- * Coefficients symetriques (phase lineaire garantie), centre a l'indice 29.
+ * Compromis : la bande passante s'arrete a 2800 Hz au lieu de 3200 Hz. Les
+ * formants vocaux F1 (200-1000 Hz) et F2 (800-2500 Hz) restent entierement
+ * preserves, seul le haut du F3 et F4 sont legerement attenues -- sans impact
+ * sur la reconnaissance de "bleu" / "rouge" qui se joue sur F1/F2.
+ *
+ * Coefficients symetriques (phase lineaire garantie), centre aux indices 19-20.
  *
  * NE PAS MODIFIER MANUELLEMENT -- regenerer via http://t-filter.engineerjs.com
  */
@@ -23,7 +28,7 @@
 #include <stdint.h>
 
 /** Nombre total de coefficients (taps) du filtre RIF */
-constexpr size_t FILTER_TAPS = 59U;
+constexpr size_t FILTER_TAPS = 40U;
 
 /**
  * Coefficients en Q15 (int16 signes).
@@ -34,12 +39,9 @@ constexpr size_t FILTER_TAPS = 59U;
  * largement sous INT32_MAX = 2.15e9 (marge x20).
  */
 constexpr int16_t FILTER_COEFS_Q15[FILTER_TAPS] = {
-      189,    509,   -107,    -45,   -226,   -239,   -160,     30,
-      238,    360,    314,     90,   -227,   -484,   -534,   -306,
-      136,    603,    851,    694,    112,   -702,  -1381,  -1514,
-     -807,    767,   2926,   5138,   6790,   7402,   6790,   5138,
-     2926,    767,   -807,  -1514,  -1381,   -702,    112,    694,
-      851,    603,    136,   -306,   -534,   -484,   -227,     90,
-      314,    360,    238,     30,   -160,   -239,   -226,    -45,
-     -107,    509,    189
+     -216,   -394,   -400,   -459,   -246,      4,    371,    601,
+      652,    377,   -136,   -770,  -1240,  -1292,   -713,    520,
+     2248,   4120,   5708,   6618,   6618,   5708,   4120,   2248,
+      520,   -713,  -1292,  -1240,   -770,   -136,    377,    652,
+      601,    371,      4,   -246,   -459,   -400,   -394,   -216
 };
