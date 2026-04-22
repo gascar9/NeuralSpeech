@@ -282,8 +282,13 @@ void configureADC(void)
 {
     PMC->PMC_PCER1 = (1u << (ID_ADC - 32));
     ADC->ADC_CR    = ADC_CR_SWRST;
+    // PRESCAL=1 → ADC_CLK = MCK / ((1+1)*2) = 84/4 = 21 MHz (max safe 22 MHz)
+    // Conversion 12 bits = 20 ADC cycles ≈ 0.95 µs (vs 20 µs avec PRESCAL=41).
+    // Impact : l'ISR TC0 qui spin-wait sur EOC passe de 20 µs → ~1 µs,
+    // libère 60 µs de CPU par groupe de 3 samples → temps filtre mesurable
+    // correctement (sinon les interruptions ISR polluaient les mesures DWT).
     ADC->ADC_MR    =
-        ADC_MR_PRESCAL(41)
+        ADC_MR_PRESCAL(1)
         | ADC_MR_STARTUP_SUT64
         | ADC_MR_TRACKTIM(0)
         | ADC_MR_SETTLING_AST3
