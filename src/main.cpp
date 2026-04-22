@@ -81,8 +81,19 @@ constexpr uint32_t FIR_BUF_MASK     = FIR_BUF_SIZE - 1;
 /** Canal ADC correspondant à A0 sur l'Arduino Due (AD7 = canal 7) */
 constexpr uint32_t ADC_CHANNEL      = 7;
 
-/** Broche DAC pour la restitution analogique (validation oscilloscope) */
-constexpr uint32_t DAC_PIN          = DAC0;
+/**
+ * Broches DAC pour la restitution analogique (validation oscilloscope).
+ * - DAC0 = signal BRUT (ADC direct, avant filtre) → référence pour comparaison
+ * - DAC1 = signal FILTRÉ (après RIF passe-bas FP2) → validation ET2 visuelle
+ *
+ * Avec les 2 DAC branchés sur CH1/CH2 de l'oscillo, l'efficacité du filtre
+ * est démontrée en temps réel : injecter un signal > 4 kHz, DAC0 reste
+ * intact, DAC1 s'effondre.
+ *
+ * En mode FP1_PURE (env due_fp1), seul DAC0 est utilisé.
+ */
+constexpr uint32_t DAC_RAW_PIN      = DAC0;   // signal ADC brut
+constexpr uint32_t DAC_FILTERED_PIN = DAC1;   // signal filtré après FP2
 
 /** Baudrate série */
 constexpr uint32_t SERIAL_BAUDRATE  = 250000;
@@ -321,6 +332,8 @@ void setup(void)
     Serial.println("*** Utiliser pour mesure Te oscillo + demo Nyquist.       ***");
 #else
     Serial.println("=== NeuralSpeech FP1+FP2 — ADC 32 kHz + filtre RIF + buf 8 kHz ===");
+    Serial.println("*** DAC0 = signal BRUT (avant filtre)  --> CH1 oscillo ***");
+    Serial.println("*** DAC1 = signal FILTRE (apres FP2)   --> CH2 oscillo ***");
 #endif
     Serial.print("FE             : "); Serial.print(FE);              Serial.println(" Hz");
     Serial.print("FE_OUT         : "); Serial.print(FE_OUT);          Serial.println(" Hz");
@@ -384,13 +397,24 @@ void loop(void)
 
 #if defined(FP1_PURE) && (FP1_PURE == 1)
         // ====================================================================
-        // Mode FP1 PURE : pas de filtrage, DAC restitue l'ADC brut.
+        // Mode FP1 PURE : pas de filtrage, DAC0 restitue l'ADC brut.
         // Objectif : validation ET1 oscilloscope (Te = 31.25 µs sur marches
         // DAC) et démo repliement spectral à 17 kHz (alias à 15 kHz visible).
         // ====================================================================
         int16_t filtered = (int16_t)((int32_t)rawSample - (int32_t)ADC_MIDSCALE);
-        analogWrite(DAC_PIN, (uint32_t)rawSample);  // DAC = ADC brut direct
+        analogWrite(DAC_RAW_PIN, (uint32_t)rawSample);
 #else
+        // ====================================================================
+        // Mode FP1+FP2 : double sortie DAC pour démo visuelle ET2 à l'oscillo.
+        //   - DAC0 = rawSample     (référence : signal ADC brut, avant filtre)
+        //   - DAC1 = filtered + DC (signal filtré : doit s'effondrer > 4 kHz)
+        // Injecter un signal à 4 kHz : CH1 (DAC0) reste intact, CH2 (DAC1)
+        // chute de -41 dB → rapport visuel x110 sur l'amplitude.
+        // ====================================================================
+
+        // --- DAC0 = signal brut (reference), sorti AVANT le filtre ---
+        analogWrite(DAC_RAW_PIN, (uint32_t)rawSample);
+
         // --- Mesure du temps de filtrage via DWT Cycle Counter (ET3) ---
         // DWT->CYCCNT s'incrémente à chaque cycle CPU (F_CPU = 84 MHz).
         // Lecture en 1 cycle hardware, zéro impact sur les ISR, précision
@@ -410,14 +434,14 @@ void loop(void)
         if (elapsedUs_x100 > timingMaxUs) { timingMaxUs = elapsedUs_x100; }
         timingCount++;
 
-        // --- Restitution DAC0 : signal filtré (validation oscilloscope FP2) ---
+        // --- DAC1 = signal filtre (validation visuelle ET2) ---
         // filtered est centré sur 0, plage [-2048, +2047].
         // DAC attend [0, 4095] → on rajoute l'offset DC 2048.
         // Clamp int32 avant cast pour éviter tout débordement sur signal saturé.
         int32_t dacVal = (int32_t)filtered + (int32_t)ADC_MIDSCALE;
         if (dacVal < 0)    { dacVal = 0;    }
         if (dacVal > 4095) { dacVal = 4095; }
-        analogWrite(DAC_PIN, (uint32_t)dacVal);
+        analogWrite(DAC_FILTERED_PIN, (uint32_t)dacVal);
 #endif
 
         // --- Sous-échantillonnage /4 → buffer 8 kHz ---
