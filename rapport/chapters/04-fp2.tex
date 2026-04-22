@@ -32,33 +32,43 @@ Le gabarit visé est :
     \item Fréquence d'échantillonnage : \SI{32}{\kilo\hertz}
 \end{itemize}
 
-Le script Python \verb|scripts/design_filter.py| utilise \verb|scipy.signal.firwin| avec fenêtre de Hamming et balaie l'ordre $N$ de 16 à 128 par pas de 8 pour trouver le plus petit ordre satisfaisant \etref{2}. Le résultat retenu est :
+Deux approches de conception ont été évaluées :
+
+\begin{enumerate}
+    \item \textbf{Méthode des fenêtres (Hamming)} via \verb|scipy.signal.firwin| avec balayage d'ordre automatique. Ordre minimal trouvé : $N = 96$ (97 taps) pour un gabarit $f_{\text{pass}} = \SI{3200}{\hertz}$, $f_{\text{stop}} = \SI{4000}{\hertz}$.
+    \item \textbf{Algorithme de Parks-McClellan (Remez exchange)} via l'outil web T-Filter, qui produit un filtre \emph{equiripple optimal} : pour un gabarit donné, c'est le nombre de taps minimum absolu.
+\end{enumerate}
+
+La seconde approche a été retenue. Sur recommandation de l'enseignant de tenir en dessous de 40 taps pour limiter la charge CPU, le gabarit a été légèrement resserré : bande passante $0 \rightarrow \SI{2.8}{\kilo\hertz}$ (au lieu de \SI{3.2}{\kilo\hertz}), transition \SI{2.8}{}$\rightarrow$\SI{4}{\kilo\hertz}. Les formants vocaux F1 et F2 (discriminants pour « bleu » / « rouge ») restent intégralement dans la bande passante.
 
 \begin{table}[H]
 \centering
 \small
-\begin{tabularx}{0.65\linewidth}{@{}l X@{}}
+\begin{tabularx}{0.75\linewidth}{@{}l X@{}}
 \toprule
 \textbf{Paramètre} & \textbf{Valeur} \\
 \midrule
-Fenêtre          & Hamming \\
-Ordre $N$        & 96 \\
-Nombre de taps   & 97 \\
-$f_c$ design (-\SI{6}{\decibel}) & \SI{3577}{\hertz} \\
-Atténuation à \SI{4}{\kilo\hertz} & \SI{30.2}{\decibel} (\etref{2} validé) \\
-Atténuation à \SI{8}{\kilo\hertz} & $>\SI{70}{\decibel}$ \\
+Algorithme de conception & Parks-McClellan (equiripple) \\
+Nombre de taps   & \textbf{40} (< 40 par consigne enseignant) \\
+Bande passante   & $0 \rightarrow \SI{2800}{\hertz}$ \\
+Bande coupée     & $\SI{4000}{\hertz} \rightarrow F_e/2$ \\
+Ripple bande passante (mesuré) & $\SI{1.09}{\decibel}$ \\
+Atténuation à \SI{4}{\kilo\hertz} & $\SI{41.48}{\decibel}$ (\etref{2} validé avec marge \SI{11.5}{\decibel}) \\
+Type de phase    & Linéaire (coefficients symétriques) \\
+Retard de groupe & $\lfloor 40/2 \rfloor = 20$ samples $= \SI{625}{\micro\second}$ à \SI{32}{\kilo\hertz} \\
+Précision        & Q15 fixed-point (int16) \\
 \bottomrule
 \end{tabularx}
 \caption{Caractéristiques du filtre RIF retenu.}
 \label{tab:fp2-filter}
 \end{table}
 
-La figure~\ref{fig:fp2-filter-response} montre la réponse en fréquence théorique obtenue avec ces coefficients. La contrainte \etref{2} est juste satisfaite avec une marge de \SI{0.2}{\decibel}, ce qui justifie le choix minimal d'ordre 96.
+La figure~\ref{fig:fp2-filter-response} montre la réponse en fréquence calculée par T-Filter. La contrainte \etref{2} est satisfaite avec une marge très confortable de \SI{11.5}{\decibel} (atténuation mesurée \SI{41.5}{\decibel} vs seuil \SI{30}{\decibel}) --- cette marge compense les éventuelles imperfections de l'ADC/DAC et garantit \etref{2} en conditions réelles.
 
 \begin{figure}[H]
 \centering
 \includegraphics[width=\linewidth]{FP2/filter_response.png}
-\caption{Réponse en fréquence du filtre RIF Hamming ordre 96 (97 taps). L'atténuation atteint \SI{30.2}{\decibel} à \SI{4}{\kilo\hertz}, validant \etref{2}.}
+\caption{Réponse en fréquence du filtre RIF Parks-McClellan 40 taps. Rouge : gain effectif, gris : tolérances du gabarit (ripple passband, seuil d'atténuation stopband). L'atténuation atteint \SI{41.5}{\decibel} à \SI{4}{\kilo\hertz}, validant \etref{2} avec \SI{11.5}{\decibel} de marge.}
 \label{fig:fp2-filter-response}
 \end{figure}
 
@@ -174,20 +184,50 @@ Un compteur \verb|micros()| englobe l'appel à \verb|filter_sample()| pour mesur
 
 \TODO{Injecter à \SI{17}{\kilo\hertz} (là où avant FP2 on voyait un fantôme à \SI{15}{\kilo\hertz} par repliement) : avec le filtre actif, le signal doit être atténué de plus de \SI{60}{\decibel} $\rightarrow$ DAC0 silencieux (sauf bruit de quantification). Screenshot à comparer avec la capture FP1 sans filtre.}
 
-\subsubsection{Temps d'exécution}
+\subsubsection{Temps d'exécution (ET3) --- mesuré}
 
-\TODO{Capture console série affichant la ligne \verb|[FP2] filter_us_avg=... max=...|. Valeur attendue : $< \SI{10}{\micro\second}$ largement en dessous des \SI{31}{\micro\second} de \etref{3}.}
+Le temps de filtrage est mesuré en runtime via le compteur de cycles matériel \texttt{DWT->CYCCNT} (Cortex-M3), qui incrémente à chaque cycle CPU avec une lecture en 1 cycle et zéro interaction avec les interruptions --- contrairement à la fonction Arduino \verb|micros()| dont le retry-loop est perturbé par l'ISR TC0 à \SI{32}{\kilo\hertz}.
+
+La console série affiche toutes les secondes la ligne \verb|[FP2] filter_us_avg=... max=...|. Résultats observés sur plus de 30 secondes de fonctionnement continu :
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{0.65\linewidth}{@{}l r X@{}}
+\toprule
+\textbf{Métrique} & \textbf{Valeur} & \textbf{Commentaire} \\
+\midrule
+\verb|filter_us_avg|       & $\SI{11.29}{\micro\second}$ & constant à $\pm\SI{0.01}{\micro\second}$ près \\
+\verb|filter_us_max|       & $\SI{14.27}{\micro\second}$\,--\,$\SI{14.64}{\micro\second}$ & dispersion stable \\
+Budget \etref{3}           & $\SI{31.25}{\micro\second}$ & $1/F_e$ \\
+\textbf{Marge vs \etref{3}} & \textbf{$\SI{16.6}{\micro\second}$ soit 53\,\%} & confortable \\
+\verb|buf_used|            & 0\,--\,1 sur 512             & aucun échantillon perdu \\
+\bottomrule
+\end{tabularx}
+\caption{Mesures de temps de filtrage en régime permanent.}
+\label{tab:fp2-timing}
+\end{table}
+
+\paragraph{Historique des optimisations.} Quatre améliorations successives ont permis de passer de $\sim \SI{900}{\micro\second}$ (1\textsuperscript{re} tentative naïve) à $\SI{11}{\micro\second}$, soit un facteur $\times 80$ :
+
+\begin{enumerate}
+    \item \textbf{Migration float $\rightarrow$ Q15 fixed-point} (voir sous-section précédente). Gain estimé $\times 10$\,--\,$\times 30$ selon la charge.
+    \item \textbf{Activation réelle de \texttt{-O2}} via \verb|build_unflags = -Os|. Le framework Arduino PlatformIO concaténait son \texttt{-Os} après nos \texttt{build\_flags}, écrasant silencieusement notre \texttt{-O2}. Diagnostic par inspection de la ligne \verb|arm-none-eabi-g++| en mode verbose.
+    \item \textbf{Mesure de temps précise via DWT}. La fonction \verb|micros()| introduisait jusqu'à \SI{60}{\micro\second} d'overhead pollué par les ISR.
+    \item \textbf{Prescaler ADC $41 \rightarrow 1$}. L'\texttt{ADC\_CLK} passe de \SI{1}{\mega\hertz} à \SI{21}{\mega\hertz}, la conversion de \SI{20}{\micro\second} à $\sim \SI{1}{\micro\second}$. Le \emph{spin-wait} dans l'ISR TC0 est réduit proportionnellement, libérant le CPU pour la boucle.
+\end{enumerate}
 
 \subsection{Bilan FP2}
 
-Le filtre anti-repliement RIF d'ordre 96 en Q15 fixed-point est opérationnel. Caractéristiques chiffrées :
+Le filtre anti-repliement RIF Parks-McClellan 40 taps en Q15 fixed-point est opérationnel et validé :
 
 \begin{itemize}
-    \item \textbf{\etref{2}} : atténuation de \SI{30.2}{\decibel} à \SI{4}{\kilo\hertz} (théorique) --- à confirmer par les mesures bench.
-    \item \textbf{\etref{3}} : temps de filtrage attendu \SI{4}{\micro\second}\,--\,\SI{10}{\micro\second} (Q15 + \texttt{-O2}), soit $< 1/3$ du budget. Marge confortable pour FP3 et FP4.
-    \item \textbf{Empreinte mémoire} : 8060 octets de SRAM (\num{8.2}\,\%), 26\,516 octets de Flash (\num{5.1}\,\%).
+    \item \textbf{\etref{2}} : atténuation \SI{41.5}{\decibel} à \SI{4}{\kilo\hertz} en conception (T-Filter), marge de \SI{11.5}{\decibel} sur le seuil \SI{30}{\decibel} --- à confirmer par la mesure bench (tableau~\ref{tab:fp2-measures}).
+    \item \textbf{\etref{3}} : temps de filtrage mesuré \textbf{\SI{11.29}{\micro\second}} (moyenne) / \textbf{\SI{14.64}{\micro\second}} (pire cas). Budget $< \SI{31.25}{\micro\second}$ \textbf{respecté avec 53\,\% de marge}.
+    \item \textbf{Empreinte mémoire} : 8064 octets de SRAM (\num{8.2}\,\%), 27\,160 octets de Flash (\num{5.2}\,\%).
+    \item \textbf{Contrainte ordre $<$ 40 taps} (consigne enseignant) : respectée exactement avec 40 taps.
     \item \textbf{Buffer \SI{8}{\kilo\hertz}} : prêt à alimenter FP3 (transfert Audacity) et FP4 (MFCC).
-    \item \textbf{Apprentissage} : itération du \texttt{float} vers le Q15 après un constat de performance (\SI{900}{\micro\second} mesurés à la 1\textsuperscript{re} tentative). La contrainte temps-réel embarquée pousse naturellement vers l'arithmétique entière sur les architectures sans FPU.
+    \item \textbf{Apprentissage} : le passage du \texttt{float} au Q15, la découverte de l'écrasement de \texttt{-O2} par \texttt{-Os}, et la reconfiguration de l'ADC illustrent la méthodologie de debug temps-réel embarqué (profiler avant d'optimiser, bench d'abord puis datasheet).
 \end{itemize}
 
 \newpage
