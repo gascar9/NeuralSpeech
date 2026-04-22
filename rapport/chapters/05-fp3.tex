@@ -1,0 +1,56 @@
+\section{FP3 --- Écoute et validation de l'enregistrement}
+\label{sec:fp3}
+
+Fonction couverte par l'exigence \etref{4} : \emph{une lecture sur Audacity doit pouvoir restituer de manière claire l'enregistrement du mot « Électronique »}.
+
+\subsection{Objectif}
+
+Cette fonction sert de \emph{contrôle de bout en bout} des étages FP1 et FP2 : si l'enregistrement reproduit fidèlement la voix humaine à l'écoute, cela atteste que la numérisation et le filtrage fonctionnent correctement. C'est une fonction de validation, non un bloc fonctionnel du produit final.
+
+\subsection{Conception}
+
+\subsubsection{Protocole de transfert}
+
+\TODO{Décrire :
+\begin{itemize}
+    \item Déclenchement par appui bouton $\rightarrow$ capture d'\SI{1}{\second} = 8000 échantillons à \SI{8}{\kilo\hertz}
+    \item Format des échantillons : int16 little-endian (2 octets / échantillon)
+    \item Baudrate série : \num{250000} bauds
+    \item Header de synchronisation : \TODO{ex. \texttt{0xAA55} ou caractère délimiteur}
+\end{itemize}}
+
+\subsubsection{Script Python côté PC}
+
+\TODO{Commit du script \texttt{scripts/serial\_to\_wav.py} qui :
+\begin{enumerate}
+    \item Ouvre le port série
+    \item Attend le header
+    \item Lit 8000 int16
+    \item Écrit un fichier \texttt{.wav} (16 bits, mono, \SI{8}{\kilo\hertz}) via \texttt{scipy.io.wavfile} ou \texttt{wave}
+\end{enumerate}
+Inclure l'extrait clé du script dans le rapport.}
+
+\subsection{Validation}
+
+\subsubsection{Enregistrement du mot « Électronique »}
+
+\TODO{Figure \texttt{fp3-audacity-electronique.png} : capture Audacity montrant :
+\begin{itemize}
+    \item La forme d'onde temporelle du mot (visualisation des 4 syllabes)
+    \item Le spectrogramme associé (bande 0--\SI{4}{\kilo\hertz})
+    \item La fréquence d'échantillonnage indiquée (\SI{8}{\kilo\hertz})
+\end{itemize}}
+
+\subsubsection{Validation auditive}
+
+\TODO{Décrire l'écoute : intelligibilité, absence de cliquetis, absence d'artefacts de sous-échantillonnage. Stocker le fichier \texttt{.wav} dans \texttt{docs/audio-samples/electronique.wav}.}
+
+\subsubsection{Comparaison spectrale avant/après filtre}
+
+\TODO{Optionnel mais valorisant : comparer le spectre du signal brut (si on enregistre directement la sortie ADC à \SI{32}{\kilo\hertz}) vs le signal filtré \& sous-échantillonné à \SI{8}{\kilo\hertz}. Montre visuellement l'effet du filtre.}
+
+\subsection{Bilan FP3}
+
+\TODO{Synthèse : la chaîne FP1 + FP2 est validée. Le mot est audible et intelligible dans Audacity.}
+
+\newpage

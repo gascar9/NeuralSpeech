@@ -1,0 +1,82 @@
+\section{FP6 --- Classification des enregistrements audios}
+\label{sec:fp6}
+
+Fonction couverte par l'exigence \etref{9} : \emph{le réseau de neurones doit pouvoir classifier au moins deux mots prononcés avec moins de \SI{5}{\percent} d'erreur, robustesse au bruit de fond}.
+
+\subsection{Intégration de l'inférence embarquée}
+
+\subsubsection{Pipeline temps réel}
+
+\TODO{Décrire la séquence déclenchée par l'appui bouton :
+\begin{enumerate}
+    \item \textbf{Attente} du front descendant du bouton (INPUT\_PULLUP)
+    \item \textbf{Capture} de \SI{1}{\second} d'audio via la chaîne FP1+FP2 (\SI{8}{\kilo\hertz}, filtré)
+    \item \textbf{MFCC} : appel à la fonction FP4 $\rightarrow$ matrice $62 \times 13$
+    \item \textbf{Normalisation} : soustraction des moyennes, division par les écarts-types (mêmes valeurs que le training)
+    \item \textbf{Inférence} : passage à travers les couches CNN
+    \item \textbf{Décision} : \texttt{argmax} sur le vecteur softmax
+    \item \textbf{Affichage} : allumage de la LED correspondante
+\end{enumerate}}
+
+\subsubsection{Implémentation des couches en C}
+
+\TODO{Organisation du code :
+\begin{itemize}
+    \item \texttt{lib/cnn/conv2d.cpp} --- convolution 2D manuelle (boucles imbriquées)
+    \item \texttt{lib/cnn/maxpool.cpp} --- max sur fenêtre 2$\times$2
+    \item \texttt{lib/cnn/dense.cpp} --- produit matrice-vecteur + biais
+    \item \texttt{lib/cnn/activation.cpp} --- ReLU, softmax (ou argmax direct)
+    \item \texttt{lib/cnn/inference.cpp} --- orchestrateur appelant les couches dans l'ordre
+\end{itemize}}
+
+\TODO{Extrait de code clé : la convolution 2D avec annotations des boucles et des indices.}
+
+\subsubsection{Sanity check Python $\leftrightarrow$ C}
+
+\TODO{Sur un sample connu :
+\begin{itemize}
+    \item Injecter les MFCC dans le modèle Python $\rightarrow$ sortie softmax $P_{\text{py}}$
+    \item Injecter les mêmes MFCC dans l'inférence C (via console série ou test bench) $\rightarrow$ sortie $P_{\text{C}}$
+    \item Vérifier que $\|P_{\text{py}} - P_{\text{C}}\|_\infty < 10^{-5}$
+    \item Ce test garantit l'absence de bug d'implémentation avant la phase terrain
+\end{itemize}}
+
+\subsection{Validation (ET9)}
+
+\subsubsection{Protocole expérimental}
+
+\TODO{Définir le protocole :
+\begin{itemize}
+    \item $\geq$ 10 mots prononcés par membre du groupe (donc $\geq$ 40 tests)
+    \item Conditions : silence de laboratoire vs bruit de fond (musique, conversations)
+    \item Distances : \SI{10}{\centi\meter}, \SI{30}{\centi\meter}, \SI{1}{\meter}
+    \item Journalisation : pour chaque test, enregistrer mot prononcé / mot prédit / confiance softmax
+\end{itemize}}
+
+\subsubsection{Taux de reconnaissance}
+
+\TODO{Tableau \texttt{tab:fp6-taux-reconnaissance} avec 3 lignes (conditions : calme, bruit faible, bruit fort) et colonnes par locuteur. Calculer le taux global et vérifier $< \SI{5}{\percent}$ d'erreur.}
+
+\subsubsection{Temps d'inférence}
+
+\TODO{Mesurer via \texttt{micros()} le temps total de l'inférence (tout le pipeline MFCC $\rightarrow$ décision). Cible : $< \SI{500}{\milli\second}$ pour une expérience utilisateur fluide.}
+
+\subsubsection{Démonstration vidéo}
+
+\TODO{Enregistrer une courte vidéo (\SI{15}{\second}) montrant plusieurs mots prononcés successivement avec la LED correspondante qui s'allume. Lien ou QR-code à placer dans le rapport.}
+
+\subsection{Discussion et limites}
+
+\TODO{Discuter :
+\begin{itemize}
+    \item Mots proches phonétiquement : le modèle se trompe-t-il plus ?
+    \item Sensibilité à la distance, à l'intensité de la voix
+    \item Cas des mots non appris : que fait le système ? (idéalement : allume une LED « inconnu » si la confiance max $< 0{,}7$)
+    \item Pistes d'amélioration : data augmentation plus agressive, quantification int8 pour rapidité, ajout d'une couche de dropout
+\end{itemize}}
+
+\subsection{Bilan FP6}
+
+\TODO{Synthèse globale : taux de reconnaissance global, temps d'inférence, robustesse au bruit, ET9 validée ou non.}
+
+\newpage

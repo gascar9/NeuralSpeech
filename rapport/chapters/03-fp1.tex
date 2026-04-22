@@ -1,0 +1,134 @@
+\section{FP1 --- Numérisation du signal audio}
+\label{sec:fp1}
+
+Fonction couverte par l'exigence \etref{1} : \emph{l'ADC de l'Arduino Due doit être capable d'échantillonner le signal à une fréquence de \SI{32}{\kilo\hertz}}.
+
+\subsection{Conception}
+
+\subsubsection{Choix technique : Timer Counter vs ADC free-running}
+
+Pour garantir un échantillonnage fixe et précis, deux approches s'offrent sur le SAM3X8E :
+
+\begin{itemize}
+    \item \textbf{ADC en mode free-running} : l'ADC enchaîne les conversions en continu à une cadence déterminée par $F_e = \dfrac{F_{\text{MCK}}}{\text{prescaler} \times 20 \text{ cycles} \times N_{\text{canaux}}}$. Simple à mettre en œuvre, mais la fréquence est difficile à régler précisément à \SI{32}{\kilo\hertz}, et elle dépend du nombre de canaux actifs (non robuste à une extension future).
+    \item \textbf{Déclenchement par Timer Counter} (retenu) : un timer matériel (TC) génère une interruption à cadence strictement isochrone, indépendante de la charge CPU. Chaque interruption déclenche une conversion ADC. Cette approche est \emph{exigée} par le cahier des charges (« mode d'interruption sur timer »).
+\end{itemize}
+
+Le canal \texttt{TC0\_CH0} est configuré avec l'horloge \texttt{TIMER\_CLOCK2} (MCK/8 = \SI{10.5}{\mega\hertz}). Pour obtenir une fréquence de \SI{32}{\kilo\hertz}, la valeur du compteur RC est :
+\[
+\text{RC} = \left\lfloor \frac{10\,500\,000}{32\,000} \right\rfloor = 328 \quad \Rightarrow \quad F_e^{\text{réelle}} = \frac{10\,500\,000}{328} = \SI{32012}{\hertz}
+\]
+L'erreur vaut \num{0.04}\,\%, largement en dessous du seuil d'acceptabilité pour la suite du traitement.
+
+\subsubsection{Architecture de l'acquisition}
+
+L'ISR du TC lit directement le registre \texttt{ADC\_LCDR} contenant la dernière conversion, et pousse l'échantillon dans un buffer circulaire de 512 éléments (puissance de 2, pour remplacer l'opération modulo \texttt{\% N} par un masque binaire \texttt{\& (N-1)}). La boucle principale consomme ce buffer et écrit chaque échantillon sur le DAC0 pour validation à l'oscilloscope.
+
+\subsubsection{Registres SAM3X8E utilisés}
+
+\begin{itemize}
+    \item \texttt{ADC\_MR} : mode registre --- prescaler (PRESCAL), trigger (TRGEN + TRGSEL) sur TC0-CH0
+    \item \texttt{ADC\_CHER} : activation du canal AD7 (broche A0)
+    \item \texttt{ADC\_IER} : interruption \texttt{EOC7} (fin de conversion canal 7)
+    \item \texttt{TC0->TC\_CHANNEL[0].TC\_CMR} : mode WAVE, TCCLKS = TIMER\_CLOCK2, RC compare
+    \item \texttt{TC0->TC\_CHANNEL[0].TC\_RC} : valeur de comparaison (328)
+    \item \texttt{TC0->TC\_CHANNEL[0].TC\_IER} : interruption CPCS
+\end{itemize}
+
+\subsection{Implémentation}
+
+Extrait du code d'initialisation du Timer Counter :
+
+\begin{lstlisting}[style=cpp, caption={Configuration du Timer Counter TC0-CH0 pour déclencher l'ADC à \SI{32}{\kilo\hertz}.}]
+constexpr uint32_t TC_RC_VALUE = 328;   // 10.5 MHz / 328 = 32012 Hz
+
+pmc_enable_periph_clk(ID_TC0);
+TC_Configure(TC0, 0,
+    TC_CMR_WAVE | TC_CMR_WAVSEL_UP_RC | TC_CMR_TCCLKS_TIMER_CLOCK2);
+TC_SetRC(TC0, 0, TC_RC_VALUE);
+TC_Start(TC0, 0);
+TC0->TC_CHANNEL[0].TC_IER = TC_IER_CPCS;
+NVIC_SetPriority(TC0_IRQn, 0);
+NVIC_EnableIRQ(TC0_IRQn);
+\end{lstlisting}
+
+Extrait de l'ISR --- volontairement minimaliste (pas de \texttt{Serial.print}, pas de calcul flottant) :
+
+\begin{lstlisting}[style=cpp, caption={Interruption TC0 : lecture ADC et push dans le buffer circulaire.}]
+void TC0_Handler() {
+    TC_GetStatus(TC0, 0);  // acquittement obligatoire
+
+    // Déclenchement de la conversion ADC
+    ADC->ADC_CR = ADC_CR_START;
+    while (!(ADC->ADC_ISR & ADC_ISR_EOC7)) { /* attente fin conversion */ }
+    uint16_t sample = ADC->ADC_CDR[ADC_CHANNEL];
+
+    // Push dans le buffer circulaire
+    adcBuffer[bufHead & BUFFER_MASK] = sample;
+    bufHead++;
+    sampleCount++;
+}
+\end{lstlisting}
+
+\subsection{Validation (ET1)}
+
+\subsubsection{Protocole expérimental}
+
+\begin{enumerate}
+    \item Injection d'une sinusoïde de référence sur la broche A0 via générateur de fonctions.
+    \item Observation du signal reconstruit sur la broche DAC0 (pin 66) à l'oscilloscope.
+    \item Mesure de la période entre deux échantillons du DAC $\rightarrow$ comparaison à $T_e = 1/F_e = \SI{31.25}{\micro\second}$.
+    \item Test de la condition de Nyquist : montée de la fréquence d'entrée jusqu'à \SI{16}{\kilo\hertz} (limite théorique), puis au-delà pour observer le repliement spectral.
+\end{enumerate}
+
+\subsubsection{Résultats obtenus}
+
+\paragraph{Capture oscilloscope à \SI{1}{\kilo\hertz}.} La figure~\ref{fig:fp1-oscillo-1khz} montre le signal injecté (CH2, violet) et le signal reconstruit par le DAC (CH1, jaune). On mesure :
+
+\begin{itemize}
+    \item $F = \SI{1.00}{\kilo\hertz}$ (fréquence reconstruite identique à l'injection)
+    \item $V_{pp} = \SI{1.08}{\volt}$, $\overline{V} = \SI{1.68}{\volt}$ (cohérent avec le bias DC typique du MAX9814)
+    \item Période $T = \SI{1.00}{\milli\second}$
+\end{itemize}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.8\linewidth]{FP1/FP1Oscilloscope2.jpeg}
+\caption{Oscilloscope : sinusoïde \SI{1}{\kilo\hertz} (CH2, violet) injectée sur A0, reconstruction par DAC0 (CH1, jaune). La fréquence est correctement préservée.}
+\label{fig:fp1-oscillo-1khz}
+\end{figure}
+
+\paragraph{Vue d'ensemble du banc de test.} La figure~\ref{fig:fp1-banc} présente le banc complet (oscilloscope Siglent SDS~1102CML+, générateur SDG~805, Arduino Due).
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.7\linewidth]{FP1/FP1Oscilloscope.jpeg}
+\caption{Banc de test FP1 : oscilloscope, générateur de fonctions et Arduino Due.}
+\label{fig:fp1-banc}
+\end{figure}
+
+\paragraph{Valeurs ADC brutes sur console série.} La figure~\ref{fig:fp1-adc} montre la progression des valeurs ADC à chaque échantillon : on observe une sinusoïde discrétisée (amplitude ADC $\approx$ 1015 unités, soit $\SI{0.82}{\volt_{pp}}$), sans saut ni échantillon manquant, confirmant le bon fonctionnement du buffer circulaire.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.45\linewidth]{FP1/FP1Result.png}
+\caption{Extrait de la console série : valeurs ADC brutes. La progression monotone (montée puis descente) suit fidèlement la sinusoïde injectée.}
+\label{fig:fp1-adc}
+\end{figure}
+
+\paragraph{Mesure directe de $F_e = \SI{32}{\kilo\hertz}$.} \TODO{Capture oscilloscope au zoom \texttt{M~\SI{5}{\micro\second}/div} sur DAC0 seul. Mesurer au curseur la période entre deux marches successives : valeur attendue \SI{31.25}{\micro\second} $\pm$ \SI{0.5}{\micro\second}. Joindre également la valeur affichée par la console série : \texttt{[FP1] Fe\_reelle=XXXXX Hz}.}
+
+\paragraph{Test du critère de Nyquist.} \TODO{Deux captures à produire :
+\begin{itemize}
+    \item Injection à \SI{15}{\kilo\hertz} (inférieur à $F_e/2 = \SI{16}{\kilo\hertz}$) : signal reconstruit à \SI{15}{\kilo\hertz}, visible sur DAC0.
+    \item Injection à \SI{17}{\kilo\hertz} (supérieur à $F_e/2$) : observation du repliement spectral $\rightarrow$ fréquence fantôme à $32 - 17 = \SI{15}{\kilo\hertz}$.
+\end{itemize}
+Cette démonstration valide la nécessité du filtre anti-repliement implémenté en FP2.}
+
+\subsection{Bilan FP1}
+
+L'acquisition à \SI{32}{\kilo\hertz} est opérationnelle. L'erreur de fréquence (\num{0.04}\,\%) est largement en dessous des tolérances courantes pour un projet de reconnaissance vocale. L'ISR, mesurée à environ 1~\si{\micro\second} (temps de conversion ADC inclus), laisse un budget confortable pour l'ajout du filtrage numérique en FP2 (budget total $< \SI{31.25}{\micro\second}$ par échantillon, \etref{3}).
+
+\paragraph{Ressources utilisées.} Après compilation, l'empreinte firmware est de \num{3680}\,octets de SRAM (\num{3.7}\,\%) et \num{25488}\,octets de Flash (\num{4.9}\,\%), sans optimisation particulière.
+
+\newpage

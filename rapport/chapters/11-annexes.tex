@@ -1,0 +1,47 @@
+\appendix
+\renewcommand{\thesection}{\Alph{section}}
+
+\section{Code source clé}
+
+\subsection{FP1 --- Initialisation de l'ADC avec trigger TC}
+
+\TODO{Extrait complet de la fonction \texttt{setupAdc()} depuis \texttt{src/main.cpp}.}
+
+\subsection{FP2 --- Filtre RIF passe-bas}
+
+\TODO{Fonction \texttt{filter\_sample()} avec le buffer circulaire.}
+
+\subsection{FP4 --- Pipeline MFCC complet}
+
+\TODO{Fonction \texttt{compute\_mfcc()}.}
+
+\subsection{FP5 --- Script d'entraînement Python}
+
+\TODO{Contenu principal de \texttt{scripts/train.py}.}
+
+\subsection{FP6 --- Boucle d'inférence}
+
+\TODO{Fonction \texttt{run\_inference()}.}
+
+\section{Schémas électriques}
+
+\TODO{Schéma complet du câblage (idéalement KiCad ou Fritzing). Inclure la table de correspondance pin $\rightarrow$ fonction.}
+
+\section{Mesures brutes}
+
+\TODO{Tableau des mesures faites à l'oscilloscope (ET1, ET2), sur la console (ET3), lors des tests de reconnaissance (ET9).}
+
+\section{Datasheets de référence}
+
+\begin{itemize}
+    \item Atmel SAM3X8E --- \emph{Datasheet}. \url{https://ww1.microchip.com/downloads/aemDocuments/documents/MCU32/ProductDocuments/DataSheets/Atmel-11057-32-bit-Cortex-M3-Microcontroller-SAM3X-SAM3A_Datasheet.pdf}
+    \item MAX9814 --- \emph{Microphone Amplifier with AGC}. Maxim Integrated. \url{https://www.analog.com/media/en/technical-documentation/data-sheets/MAX9814.pdf}
+    \item Arduino Due --- \emph{Official documentation}. \url{https://docs.arduino.cc/hardware/due/}
+\end{itemize}
+
+\section{Dépôt GitHub}
+
+Le code source complet, les scripts Python, les datasets, les spec/plan/roadmap et ce rapport sont versionnés sur :
+\begin{center}
+\url{https://github.com/gascar9/NeuralSpeech}
+\end{center}

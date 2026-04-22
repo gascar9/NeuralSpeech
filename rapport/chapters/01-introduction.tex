@@ -1,0 +1,60 @@
+\section{Introduction}
+
+\subsection{Contexte et problématique}
+
+Dans le cadre du module de Calcul Embarqué du semestre 6 (ING3) à l'ECE Paris, il est demandé de concevoir un système de reconnaissance vocale fondé sur une intelligence artificielle s'exécutant \emph{intégralement} sur une carte Arduino Due (SAM3X8E, \SI{84}{\mega\hertz}, \SI{96}{\kibi\byte} de SRAM). Le projet, nommé \textbf{NeuralSpeech}, s'inscrit dans la continuité pédagogique des modules de traitement numérique du signal, d'architecture microcontrôleur et d'apprentissage automatique.
+
+La ligne rouge à ne pas franchir est formelle : \emph{la reconnaissance doit se faire sur l'Arduino Due impérativement}. Un projet fonctionnel sur PC mais incapable de tourner sur le microcontrôleur entraîne un malus forfaitaire de -12 points sur la note finale.
+
+\subsection{Objectifs du projet}
+
+L'objectif est de réaliser une chaîne complète de traitement audio, depuis la captation analogique jusqu'à la classification temps réel :
+\begin{enumerate}
+    \item Numériser un signal audio à \SI{32}{\kilo\hertz} via l'ADC intégré.
+    \item Filtrer numériquement puis sous-échantillonner à \SI{8}{\kilo\hertz}.
+    \item Valider l'enregistrement par export sur Audacity.
+    \item Extraire les coefficients MFCC caractéristiques du timbre vocal.
+    \item Entraîner un réseau de neurones convolutionnel en Python.
+    \item Embarquer l'inférence sur l'Arduino Due et signaler le mot détecté par des LEDs.
+\end{enumerate}
+
+\subsection{Cadre et contraintes (ET1 à ET9)}
+
+Le sujet impose neuf exigences techniques (ET) non négociables, récapitulées au tableau~\ref{tab:et}.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\linewidth}{@{}l X@{}}
+\toprule
+\textbf{Exigence} & \textbf{Libellé} \\
+\midrule
+\etref{1} & ADC \SI{32}{\kilo\hertz} via interruption timer, échantillonnage fixe et précis \\
+\etref{2} & Atténuation $\geq \SI{30}{\decibel}$ au-dessus de \SI{4}{\kilo\hertz} \\
+\etref{3} & Filtrage $< \SI{31}{\micro\second}$ par échantillon \\
+\etref{4} & Enregistrement du mot « Électronique » restituable sur Audacity \\
+\etref{5} & Frames de 256 échantillons avec recouvrement (hop \texttt{128}) \\
+\etref{6} & 13 MFCCs générés à partir d'un enregistrement d'\SI{1}{\second} \\
+\etref{7} & MSE $< 0{,}05$ sur données de test après entraînement \\
+\etref{8} & Dataset $\geq$ 100 éléments (50 par mot, $\geq 2$ mots) \\
+\etref{9} & $< 5\%$ d'erreur sur $\geq 10$ mots prononcés, robustesse au bruit de fond \\
+\bottomrule
+\end{tabularx}
+\caption{Exigences techniques imposées par le cahier des charges.}
+\label{tab:et}
+\end{table}
+
+\subsection{Matériel}
+
+\begin{itemize}
+    \item \textbf{Arduino Due} (microcontrôleur Atmel SAM3X8E, ARM Cortex-M3, \SI{84}{\mega\hertz}, \SI{96}{\kibi\byte} SRAM, \SI{512}{\kibi\byte} Flash, ADC 12 bits, deux DAC 12 bits)
+    \item \textbf{Microphone MAX9814} (amplificateur electret avec contrôle automatique de gain)
+    \item Bouton poussoir, LEDs de signalisation, breadboard, résistances
+    \item Oscilloscope Siglent SDS 1102CML+ et générateur de fonctions Siglent SDG 805 pour la validation
+\end{itemize}
+
+\subsection{Organisation du rapport}
+
+Ce rapport suit l'architecture fonctionnelle du système. Après une présentation globale de l'architecture (section~\ref{sec:architecture}), chaque fonction principale (FP1 à FP6) fait l'objet d'une section dédiée organisée en trois volets : conception, implémentation et validation. La section~\ref{sec:gestion-projet} détaille la gestion de projet (répartition des tâches, difficultés rencontrées), et la section~\ref{sec:conclusion} dresse le bilan et les perspectives d'évolution.
+
+\newpage

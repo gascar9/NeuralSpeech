@@ -1,0 +1,119 @@
+\section{FP5 --- Identification des résultats attendus (CNN)}
+\label{sec:fp5}
+
+Fonction couverte par les exigences \etref{7} (MSE $< 0{,}05$ sur le jeu de test) et \etref{8} (dataset $\geq$ 100 éléments).
+
+\subsection{Datasets}
+
+\subsubsection{Dataset fourni}
+
+\TODO{Décrire le dataset \texttt{Projet\_ING3-main/} :
+\begin{itemize}
+    \item \texttt{training.txt} : 100 enregistrements (50 « bleu » + 50 « rouge »), MFCC précalculés
+    \item \texttt{test.txt} : 10 enregistrements (5 + 5) pour la validation
+    \item Format : tableaux de 48 frames $\times$ 13 MFCCs
+    \item Script de visualisation : \texttt{MFCC Plotter/plot\_mfcc.py}
+\end{itemize}}
+
+\subsubsection{Dataset complémentaire (groupe)}
+
+\TODO{Pour \etref{8} et pour robustifier le modèle, enregistrer soi-même :
+\begin{itemize}
+    \item $\geq$ 50 exemplaires de chaque mot retenu, par les 4 membres du groupe, variations naturelles
+    \item Passage par la chaîne complète FP1+FP2+FP3+FP4 pour avoir le même format que le dataset fourni
+    \item Stockage : \texttt{data/custom/} --- fichiers normalisés au format 48$\times$13 ou 62$\times$13 (voir discussion ci-dessous)
+\end{itemize}}
+
+\paragraph{Note sur les dimensions.} Le dataset fourni utilise 48 frames ; notre pipeline FP4 produit 62 frames pour \SI{1}{\second} à \SI{8}{\kilo\hertz} (frame 256, hop 128). \TODO{Décider : tronquer à 48 frames (perte d'information) ou regénérer tout le dataset avec 62 frames ? Argumenter.}
+
+\subsection{Conception du CNN}
+
+\subsubsection{Architecture}
+
+\TODO{Diagramme \texttt{fp5-cnn-architecture.png} (netron.app ou équivalent). Architecture proposée (ajuster selon résultats) :}
+
+\begin{verbatim}
+Input (62, 13, 1)
+│
+├── Conv2D  8 filtres (3x3)  + ReLU
+├── MaxPool (2x2)
+│
+├── Conv2D 16 filtres (3x3)  + ReLU
+├── MaxPool (2x2)
+│
+├── Flatten
+├── Dense 32 + ReLU
+└── Dense  N + softmax  (N = nombre de classes)
+\end{verbatim}
+
+\TODO{Tableau : pour chaque couche, shape entrée / shape sortie / \# paramètres. Total cible : $\approx$ \num{10000} paramètres.}
+
+\subsubsection{Hyperparamètres d'entraînement}
+
+\begin{itemize}
+    \item Framework : \TODO{Keras/TensorFlow ou PyTorch --- choisir et justifier}
+    \item Optimiseur : Adam, $\text{lr} = 10^{-3}$
+    \item Loss : \emph{categorical crossentropy}
+    \item Batch size : \TODO{valeur}
+    \item Époques : \TODO{valeur}
+    \item Normalisation : moyenne/écart-type calculés sur le train, appliqués sur le test
+    \item Augmentation : bruit gaussien, décalage temporel $\pm \SI{20}{\milli\second}$
+\end{itemize}
+
+\subsubsection{Protocole d'évaluation}
+
+\begin{itemize}
+    \item Split : 100 train / 10 test (selon dataset fourni)
+    \item MSE sur test : cible $< 0{,}05$ (\etref{7})
+    \item \textbf{Interdiction formelle de rétropropagation sur le jeu de test}
+\end{itemize}
+
+\subsection{Résultats de l'entraînement}
+
+\subsubsection{Courbes d'apprentissage}
+
+\TODO{Figure \texttt{fp5-loss-curves.png} : loss (train, val) et accuracy (train, val) en fonction des époques. Annoter le point de meilleure performance et le seuil ET7.}
+
+\subsubsection{Matrice de confusion}
+
+\TODO{Figure \texttt{fp5-confusion-matrix.png} : matrice de confusion sur le jeu de test.}
+
+\subsubsection{Tableau récapitulatif}
+
+\TODO{Remplir le tableau~\ref{tab:fp5-results} avec les valeurs finales.}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{0.7\linewidth}{@{}l X@{}}
+\toprule
+\textbf{Métrique} & \textbf{Valeur obtenue} \\
+\midrule
+Nombre d'époques & \TODO{} \\
+Learning rate    & $10^{-3}$ (Adam) \\
+Taille du batch  & \TODO{} \\
+Temps total d'entraînement & \TODO{} \\
+MSE train        & \TODO{} \\
+MSE test         & \TODO{} \quad (cible $< 0{,}05$) \\
+Accuracy train   & \TODO{} \\
+Accuracy test    & \TODO{} \\
+\bottomrule
+\end{tabularx}
+\caption{Résultats de l'entraînement du CNN.}
+\label{tab:fp5-results}
+\end{table}
+
+\subsection{Export des poids}
+
+\TODO{Script \texttt{scripts/export\_weights.py} qui :
+\begin{enumerate}
+    \item Charge le modèle sauvegardé (\texttt{.h5})
+    \item Itère sur chaque couche pour dumper ses poids en tableau C
+    \item Génère \texttt{include/model\_weights.h} avec des \texttt{const float} (ou \texttt{int8\_t} si quantification retenue)
+\end{enumerate}}
+
+\subsection{Bilan FP5}
+
+\TODO{Synthèse : MSE test finale, capacité du modèle à discriminer correctement les deux mots, prêt pour embarquement en FP6.}
+
+\newpage

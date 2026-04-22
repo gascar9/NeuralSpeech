@@ -1,0 +1,84 @@
+\section{FP4 --- Caractérisation du timbre vocal (MFCC)}
+\label{sec:fp4}
+
+Fonction couverte par les exigences \etref{5} (frames de 256 échantillons avec recouvrement) et \etref{6} (13 MFCCs générés sur \SI{1}{\second} d'audio).
+
+\subsection{Rappel théorique}
+
+Les coefficients MFCC (\emph{Mel-Frequency Cepstral Coefficients}) capturent le timbre vocal en un vecteur compact de 13 valeurs par fenêtre temporelle, en simulant la perception fréquentielle non linéaire de l'oreille humaine (échelle MEL). Le pipeline complet est :
+\[
+\text{signal} \xrightarrow{\text{préemphase}} \xrightarrow{\text{Hamming}} \xrightarrow{\text{FFT}} |\cdot|^2 \xrightarrow{\text{banc MEL}} \log \xrightarrow{\text{DCT}} \text{13 MFCCs}
+\]
+
+\subsection{Conception}
+
+\subsubsection{Framing (ET5)}
+
+\TODO{Expliquer :
+\begin{itemize}
+    \item Frame size : 256 échantillons $\Rightarrow$ \SI{32}{\milli\second} à \SI{8}{\kilo\hertz}
+    \item Hop length : 128 échantillons $\Rightarrow$ recouvrement de \SI{50}{\percent}
+    \item Pour \SI{1}{\second} d'audio : $\lfloor (8000 - 256)/128 \rfloor + 1 = 62$ frames
+    \item Justifier le recouvrement : continuité temporelle, évite les artefacts aux bords des frames
+\end{itemize}}
+
+\subsubsection{Préemphase}
+
+Filtre du premier ordre : $y[n] = x[n] - \alpha \cdot x[n-1]$ avec $\alpha = 0{,}97$. Accentue les hautes fréquences pour compenser l'atténuation naturelle de la voix.
+
+\subsubsection{Fenêtrage Hamming}
+
+$w[n] = 0{,}54 - 0{,}46 \cdot \cos\left(\dfrac{2\pi n}{N-1}\right)$, $N = 256$. La fenêtre est \emph{précalculée en lookup table} pour économiser du temps CPU.
+
+\subsubsection{FFT 256 points}
+
+\TODO{Choix : librairie \texttt{arduinoFFT} ou implémentation manuelle radix-2. Comparer les deux si possible.}
+
+\subsubsection{Banc de filtres MEL}
+
+\TODO{Détailler :
+\begin{itemize}
+    \item Conversion Hz $\leftrightarrow$ MEL : $m = 2595 \cdot \log_{10}(1 + f/700)$
+    \item Nombre de filtres : 26 (standard)
+    \item Répartition : linéaire en échelle MEL entre \SI{0}{\hertz} et \SI{4}{\kilo\hertz}
+    \item Filtres triangulaires
+    \item Précalcul des indices de chaque filtre dans les bins FFT
+\end{itemize}}
+
+\subsubsection{DCT-II}
+
+\TODO{Transformée en cosinus discrète appliquée sur les 26 sorties log-MEL. On ne garde que les \textbf{13 premiers coefficients} (ET6). Matrice DCT 26$\times$13 précalculée.}
+
+\subsection{Implémentation}
+
+\TODO{Organisation du code :
+\begin{itemize}
+    \item \texttt{lib/mfcc/mfcc.cpp} --- fonctions du pipeline
+    \item \texttt{lib/mfcc/mfcc\_tables.h} --- lookup tables (Hamming, centres MEL, matrice DCT)
+    \item Budget mémoire estimé : \TODO{calculer}
+    \item Temps de traitement estimé par frame : \TODO{mesurer en production}
+\end{itemize}}
+
+\subsection{Validation (ET6)}
+
+\subsubsection{Validation étape par étape}
+
+\TODO{Figure \texttt{fp4-pipeline.png} : 6 sous-graphes matplotlib présentant le même signal aux différentes étapes (brut, préemphase, Hamming, FFT, post-MEL, MFCC).}
+
+\subsubsection{Test FFT sur sinusoïde pure}
+
+\TODO{Injection d'une sinusoïde à \SI{1}{\kilo\hertz} pure : vérifier que la FFT calculée embarquée produit un pic au bin $\lfloor 1000 \cdot 256 / 8000 \rfloor = 32$. Capture écran à joindre (figure \texttt{fp4-fft-1khz.png}).}
+
+\subsubsection{Comparaison avec référence Python}
+
+\TODO{Exécuter le script Python fourni sur GitHub Pôle Électronique (\texttt{scripts/mfcc\_reference.py}) sur le même enregistrement. Comparer coefficient par coefficient. Écart moyen attendu $< \SI{5}{\percent}$.}
+
+\subsubsection{Heatmap MFCC « bleu » vs « rouge »}
+
+\TODO{Figure \texttt{fp4-heatmap-bleu-rouge.png} : deux heatmaps $62 \times 13$ côte à côte pour les deux mots. Doit faire apparaître une signature visuelle différente --- preuve que les MFCC sont discriminants.}
+
+\subsection{Bilan FP4}
+
+\TODO{Synthèse : pipeline fonctionnel, MFCC cohérents avec la référence Python, prêts à alimenter le CNN.}
+
+\newpage

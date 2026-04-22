@@ -1,0 +1,19 @@
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.toc
+*.lof
+*.lot
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.bbl
+*.blg
+*.nav
+*.snm
+*.vrb
+
+# Ne pas commit le PDF tant qu'on n'est pas en version finale
+# (décommenter la ligne suivante quand on veut versionner le PDF livré)
+*.pdf

@@ -1,0 +1,73 @@
+\section{FP2 --- Conditionnement du signal}
+\label{sec:fp2}
+
+Fonction couverte par les exigences \etref{2} (atténuation $\geq \SI{30}{\decibel}$ au-dessus de \SI{4}{\kilo\hertz}) et \etref{3} (filtrage $< \SI{31}{\micro\second}$ par échantillon).
+
+\subsection{Contexte}
+
+Pour permettre un traitement léger par le réseau de neurones, la fréquence d'échantillonnage est ramenée de \SI{32}{\kilo\hertz} à \SI{8}{\kilo\hertz} (sous-échantillonnage par 4). Cette fréquence est suffisante pour préserver le contenu spectral de la voix humaine (bande utile $\leq \SI{4}{\kilo\hertz}$ selon la théorie de la voix --- formants principaux entre \SI{300}{\hertz} et \SI{3400}{\hertz}).
+
+Toutefois, le sous-échantillonnage brutal provoquerait un \emph{repliement spectral} (aliasing) : toute composante fréquentielle au-delà de \SI{4}{\kilo\hertz} viendrait se replier dans la bande utile. Il faut donc d'abord appliquer un filtre numérique passe-bas.
+
+\subsection{Conception du filtre (ET2)}
+
+\subsubsection{Choix RIF vs RII}
+
+\TODO{Développer la justification du choix. Arguments attendus :
+\begin{itemize}
+    \item RIF (réponse impulsionnelle finie) : phase linéaire (pas de distorsion de phase, critique pour la voix), stabilité garantie. Coût : plus de coefficients.
+    \item RII (réponse impulsionnelle infinie) : moins de coefficients, mais phase non linéaire et risque d'instabilité numérique.
+    \item \textbf{Choix retenu} : RIF avec méthode des fenêtres (Hamming ou Blackman), ordre \TODO{N}.
+\end{itemize}}
+
+\subsubsection{Gabarit du filtre}
+
+\TODO{Préciser :
+\begin{itemize}
+    \item Fréquence de coupure : \SI{4}{\kilo\hertz}
+    \item Atténuation dans la bande coupée : $\geq \SI{30}{\decibel}$ à \SI{4}{\kilo\hertz} (\etref{2})
+    \item Ondulation dans la bande passante : $\leq$ \TODO{valeur}
+    \item Fréquence d'échantillonnage : \SI{32}{\kilo\hertz}
+\end{itemize}}
+
+\subsubsection{Calcul des coefficients}
+
+\TODO{Joindre le script Python (\texttt{scripts/design\_filter.py}) qui utilise \texttt{scipy.signal.firwin} avec fenêtre Hamming pour calculer les coefficients. Commit du tableau de coefficients en C (header \texttt{include/filter\_coefs.h}).}
+
+\TODO{Inclure la réponse en fréquence théorique (graphe matplotlib Python) --- figure \texttt{filter\_response.png} à \texttt{figures/FP2/}.}
+
+\subsection{Implémentation (ET3)}
+
+\subsubsection{Buffer circulaire et convolution}
+
+\TODO{Expliquer la structure : buffer circulaire de taille = ordre du filtre + 1, puissance de 2 pour masque binaire. Présenter le code de la fonction \texttt{filter\_sample()}.}
+
+\subsubsection{Sous-échantillonnage}
+
+\TODO{Décrire la stratégie : on filtre tous les échantillons à \SI{32}{\kilo\hertz}, puis on ne garde qu'un échantillon sur 4 pour obtenir la sortie à \SI{8}{\kilo\hertz}.}
+
+\subsubsection{Mesure du temps de filtrage}
+
+\TODO{Utiliser \texttt{micros()} pour mesurer la durée d'exécution de \texttt{filter\_sample()}. Afficher sur console. Cible : $< \SI{31}{\micro\second}$ (\etref{3}).}
+
+\subsection{Validation}
+
+\subsubsection{Réponse en fréquence mesurée}
+
+\TODO{Protocole : balayer le générateur de \SI{100}{\hertz} à \SI{16}{\kilo\hertz} par paliers (p.ex. 100, 500, 1k, 2k, 3k, 3.5k, 4k, 5k, 8k, 16k). Mesurer le niveau RMS en sortie. Tracer la courbe. Vérifier l'atténuation $\geq \SI{30}{\decibel}$ à \SI{4}{\kilo\hertz}.}
+
+\TODO{Figure \texttt{fp2-freq-response.png} : réponse théorique (Python) vs mesurée.}
+
+\subsubsection{Temps d'exécution}
+
+\TODO{Capture console série avec temps mesuré. Tableau comparatif : ordre du filtre vs durée mesurée.}
+
+\subsubsection{Spectre avant/après filtre (Audacity)}
+
+\TODO{Figure \texttt{fp2-spectrum-before-after.png} : comparaison du spectre (Audacity « Plot Spectrum ») sur un enregistrement brut vs filtré.}
+
+\subsection{Bilan FP2}
+
+\TODO{Synthèse : ordre final du filtre, temps mesuré, marge sur ET3, atténuation mesurée à \SI{4}{\kilo\hertz}.}
+
+\newpage

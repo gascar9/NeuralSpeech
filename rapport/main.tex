@@ -1,0 +1,153 @@
+\documentclass[a4paper,11pt]{article}
+
+% ========== Encodage & langue ==========
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[french]{babel}
+\usepackage{csquotes}
+
+% ========== Mise en page ==========
+\usepackage[margin=2.5cm,headheight=14pt]{geometry}
+\usepackage{setspace}
+\setstretch{1.15}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{parskip}
+
+% ========== Typographie ==========
+\usepackage{microtype}
+\usepackage{lmodern}
+\usepackage{xcolor}
+\definecolor{nsblue}{HTML}{1F6FB2}
+\definecolor{nsgray}{HTML}{4A4A4A}
+
+% ========== Graphiques ==========
+\usepackage{graphicx}
+\graphicspath{{figures/}{../assets/}}
+\usepackage{float}
+\usepackage{caption}
+\captionsetup{font=small, labelfont=bf, textfont=it, labelsep=colon}
+\usepackage{subcaption}
+
+% ========== Tableaux ==========
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{multirow}
+
+% ========== Maths & unités ==========
+\usepackage{amsmath, amssymb, amsfonts}
+\usepackage{siunitx}
+\sisetup{locale=FR, per-mode=symbol, group-separator={\,}}
+
+% ========== Code source ==========
+\usepackage{listings}
+\lstdefinestyle{cpp}{
+    language=C++,
+    basicstyle=\ttfamily\footnotesize,
+    keywordstyle=\color{nsblue}\bfseries,
+    commentstyle=\color{nsgray}\itshape,
+    stringstyle=\color{red!70!black},
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    numbersep=8pt,
+    breaklines=true,
+    breakatwhitespace=true,
+    frame=single,
+    rulecolor=\color{gray!40},
+    backgroundcolor=\color{gray!5},
+    showstringspaces=false,
+    tabsize=4,
+    captionpos=b
+}
+\lstdefinestyle{py}{
+    language=Python,
+    basicstyle=\ttfamily\footnotesize,
+    keywordstyle=\color{nsblue}\bfseries,
+    commentstyle=\color{nsgray}\itshape,
+    stringstyle=\color{red!70!black},
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    numbersep=8pt,
+    breaklines=true,
+    breakatwhitespace=true,
+    frame=single,
+    rulecolor=\color{gray!40},
+    backgroundcolor=\color{gray!5},
+    showstringspaces=false,
+    tabsize=4,
+    captionpos=b
+}
+\renewcommand{\lstlistingname}{Code}
+
+% ========== Liens ==========
+\usepackage[hidelinks]{hyperref}
+\hypersetup{
+    colorlinks=true,
+    linkcolor=nsblue,
+    urlcolor=nsblue,
+    citecolor=nsblue,
+    pdftitle={NeuralSpeech --- Reconnaissance vocale embarquée sur Arduino Due},
+    pdfauthor={Équipe NeuralSpeech}
+}
+
+% ========== En-têtes ==========
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\textit{NeuralSpeech}}
+\fancyhead[R]{ING3 S6 --- Calcul Embarqué}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.3pt}
+
+% ========== Macros projet ==========
+\newcommand{\etref}[1]{\textbf{ET#1}}
+\newcommand{\fpref}[1]{\textbf{FP#1}}
+\newcommand{\TODO}[1]{\textbf{\textcolor{red}{[TODO : #1]}}}
+\newcommand{\FILLED}[1]{\textcolor{green!50!black}{\checkmark\ #1}}
+
+% ========== Métadonnées ==========
+\title{\vspace{-2cm}
+       \Huge\textbf{\textcolor{nsblue}{NeuralSpeech}}\\[0.3em]
+       \Large Reconnaissance vocale embarquée sur Arduino Due\\[0.8em]
+       \normalsize Projet d'Électronique --- ING3 S6 Calcul Embarqué}
+\author{Équipe NeuralSpeech \\
+        \small Gaspard Boucharlat \\
+        \small \TODO{compléter avec les 3 autres membres}\\[1em]
+        \textit{École Centrale d'Électronique --- ECE Paris}}
+\date{2026}
+
+\begin{document}
+
+\maketitle
+\thispagestyle{empty}
+
+\vfill
+\begin{center}
+    \small
+    \textit{Ce rapport documente la conception et la réalisation d'un système de reconnaissance vocale embarqué sur microcontrôleur Arduino Due (SAM3X8E), dans le cadre du projet d'électronique du semestre 6.}
+\end{center}
+\vfill
+
+\newpage
+\tableofcontents
+\newpage
+
+% ========== Contenu ==========
+\input{chapters/00-resume}
+\input{chapters/01-introduction}
+\input{chapters/02-architecture}
+\input{chapters/03-fp1}
+\input{chapters/04-fp2}
+\input{chapters/05-fp3}
+\input{chapters/06-fp4}
+\input{chapters/07-fp5}
+\input{chapters/08-fp6}
+\input{chapters/09-gestion-projet}
+\input{chapters/10-conclusion}
+\input{chapters/11-annexes}
+
+% ========== Bibliographie ==========
+\bibliographystyle{plain}
+\bibliography{references}
+
+\end{document}

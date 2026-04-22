@@ -1,0 +1,74 @@
+\section{Architecture fonctionnelle}
+\label{sec:architecture}
+
+\subsection{Diagramme fonctionnel}
+
+Le système se décompose en six fonctions principales (FP) articulées comme illustré à la figure~\ref{fig:diag-fonctionnel}.
+
+\begin{figure}[H]
+\centering
+\TODO{Reproduire le diagramme fonctionnel du sujet (FP1→FP6 avec flèches voix/dataset → enregistrement audio / commande vocale). À insérer ici (figure \texttt{diagramme-fonctionnel.png} dans \texttt{figures/}).}
+\caption{Diagramme fonctionnel de NeuralSpeech.}
+\label{fig:diag-fonctionnel}
+\end{figure}
+
+\subsection{Description des blocs fonctionnels}
+
+\begin{description}
+    \item[\fpref{1} --- Numérisation du signal audio] Capture analogique du signal par l'ADC de la Due, déclenchée par interruption timer à \SI{32}{\kilo\hertz} (\etref{1}).
+    \item[\fpref{2} --- Conditionnement] Filtrage numérique passe-bas avant sous-échantillonnage à \SI{8}{\kilo\hertz} pour prévenir le repliement spectral (\etref{2}, \etref{3}).
+    \item[\fpref{3} --- Écoute et validation] Transfert série des échantillons pour restitution dans Audacity --- sert de preuve auditive que FP1 et FP2 sont corrects (\etref{4}).
+    \item[\fpref{4} --- Caractérisation du timbre vocal] Extraction des 13 coefficients MFCC par frame, avec recouvrement de 50\% (\etref{5}, \etref{6}).
+    \item[\fpref{5} --- Identification des résultats] Conception et entraînement d'un réseau de neurones convolutionnel en Python, suivi de l'export des poids (\etref{7}, \etref{8}).
+    \item[\fpref{6} --- Classification] Exécution de l'inférence sur l'Arduino Due, signalement du mot par LEDs, robustesse au bruit de fond (\etref{9}).
+\end{description}
+
+\subsection{Chaîne de traitement détaillée}
+
+La figure~\ref{fig:pipeline} détaille la chaîne de traitement complète, de l'onde acoustique à la décision.
+
+\begin{figure}[H]
+\centering
+\TODO{Schéma blocs détaillé : micro \textrightarrow\ préampli MAX9814 \textrightarrow\ ADC 32 kHz \textrightarrow\ filtre LP numérique \textrightarrow\ sous-échantillonnage /4 \textrightarrow\ trames 256 \textrightarrow\ préemphase / Hamming / FFT / MEL / DCT \textrightarrow\ matrice 62×13 MFCC \textrightarrow\ CNN \textrightarrow\ softmax \textrightarrow\ LED.}
+\caption{Chaîne complète de traitement du signal audio.}
+\label{fig:pipeline}
+\end{figure}
+
+\subsection{Architecture logicielle}
+
+Le firmware est développé avec \textbf{PlatformIO} (framework Arduino), sur l'environnement de développement Visual Studio Code avec l'extension C/C++. Le code source est organisé comme suit :
+
+\begin{itemize}
+    \item \texttt{platformio.ini} --- configuration de la plateforme (board~=~\texttt{due}, framework~=~\texttt{arduino})
+    \item \texttt{src/main.cpp} --- point d'entrée, configuration matérielle, ISR
+    \item \texttt{include/} --- headers partagés entre modules (poids CNN, lookup tables MFCC)
+    \item \texttt{lib/} --- modules réutilisables (filtres, MFCC, inférence)
+    \item \texttt{scripts/} --- outils Python côté PC (transfert série, training CNN, plots)
+\end{itemize}
+
+\subsection{Architecture matérielle}
+
+\TODO{Schéma de câblage complet à insérer (figure \texttt{cablage.png}). Contenu attendu : Arduino Due, MAX9814 (VCC, GND, OUT, GAIN), bouton poussoir sur broche D\textit{X}, 2 LEDs avec résistances série \SI{330}{\ohm} sur D\textit{Y} et D\textit{Z}, masse commune.}
+
+Les choix de broches sont synthétisés dans le tableau~\ref{tab:pinout}.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\linewidth}{@{}l l X@{}}
+\toprule
+\textbf{Broche Due} & \textbf{Composant} & \textbf{Fonction} \\
+\midrule
+A0           & MAX9814 OUT         & Entrée audio analogique (numérisée par ADC) \\
+DAC0 (pin 66)& Oscilloscope        & Reconstruction du signal pour validation \etref{1} \\
+D\TODO{?}    & Bouton              & Déclenchement d'un enregistrement d'\SI{1}{\second} \\
+D\TODO{?}    & LED « bleu »        & Signalisation du mot reconnu \\
+D\TODO{?}    & LED « rouge »       & Signalisation du mot reconnu \\
+3V3, GND     & MAX9814, LEDs       & Alimentation et masse commune \\
+\bottomrule
+\end{tabularx}
+\caption{Affectation des broches de l'Arduino Due.}
+\label{tab:pinout}
+\end{table}
+
+\newpage

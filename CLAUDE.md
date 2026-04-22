@@ -50,3 +50,14 @@ Chaîne : microphone MAX9814 → ADC 32 kHz → filtre numérique → sous-écha
 ## Note sur le versioning
 
 Le dossier `.claude/` est intégralement gitignored — les agents eux-mêmes ne sont pas partagés via git. Ce `CLAUDE.md` sert de documentation pour que n'importe quel membre du groupe (ou une session Claude Code future) puisse comprendre l'architecture et recréer les agents si besoin.
+
+## Rapport LaTeX (50 % de la note)
+
+Le rapport est dans `rapport/` en LaTeX modulaire (un `.tex` par FP dans `chapters/`). **Compilation PDF uniquement en fin de projet** ; entre-temps on édite les sources.
+
+**Règle pour les sessions Claude Code** : à chaque résultat substantiel d'une FP (code validé, mesure bench, figure produite), mettre à jour le chapitre correspondant dans `rapport/chapters/0X-fpX.tex` :
+- Remplacer les `\TODO{...}` par le contenu produit
+- Placer les figures dans `rapport/figures/FPx/` (ou référencer `assets/FPx/` via `\graphicspath`)
+- Style factuel, formules/unités en siunitx (`\SI{31.25}{\micro\second}`, `\SI{32}{\kilo\hertz}`)
+
+Roadmap complète et checklist par phase : `docs/roadmap-soutenances.md`.

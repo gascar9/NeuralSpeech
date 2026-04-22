@@ -1,0 +1,73 @@
+\section{Gestion de projet}
+\label{sec:gestion-projet}
+
+\subsection{Méthodologie --- cycle en V}
+
+\TODO{Décrire l'application du cycle en V au projet :
+\begin{itemize}
+    \item Expression des besoins (cahier des charges, ET1-ET9)
+    \item Spécifications fonctionnelles (diagramme FP1-FP6)
+    \item Conception architecturale (spec agents, découpage logiciel)
+    \item Conception détaillée par FP
+    \item Implémentation
+    \item Tests unitaires (par FP, ex. oscilloscope pour FP1)
+    \item Tests d'intégration (chaîne complète)
+    \item Validation (démonstration finale)
+\end{itemize}}
+
+\subsection{Répartition des tâches}
+
+\TODO{Tableau : qui fait quoi. Proposition à adapter :}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\linewidth}{@{}l X X@{}}
+\toprule
+\textbf{Membre} & \textbf{Rôle principal} & \textbf{Contributions} \\
+\midrule
+Gaspard Boucharlat & \TODO{rôle} & \TODO{FP(s) attribuée(s), sections du rapport} \\
+\TODO{Membre 2} & \TODO{rôle} & \TODO{} \\
+\TODO{Membre 3} & \TODO{rôle} & \TODO{} \\
+\TODO{Membre 4} & \TODO{rôle} & \TODO{} \\
+\bottomrule
+\end{tabularx}
+\caption{Répartition des tâches au sein de l'équipe.}
+\label{tab:repartition}
+\end{table}
+
+\subsection{Planning et suivi}
+
+\TODO{Inclure un diagramme de Gantt (figure \texttt{gantt.png}) avec :
+\begin{itemize}
+    \item Phases : setup $\rightarrow$ FP1 $\rightarrow$ FP2 $\rightarrow$ FP3 $\rightarrow$ soutenance 1 $\rightarrow$ FP4 $\rightarrow$ FP5 $\rightarrow$ FP6 $\rightarrow$ soutenance 2
+    \item Dépendances
+    \item Deadlines (dépôt BC, soutenances)
+\end{itemize}
+Voir également la roadmap détaillée dans \texttt{docs/roadmap-soutenances.md}.}
+
+\subsection{Outils utilisés}
+
+\begin{itemize}
+    \item \textbf{Contrôle de versions} : Git + GitHub (\url{https://github.com/gascar9/NeuralSpeech})
+    \item \textbf{Environnement d'intégration} : PlatformIO + Visual Studio Code
+    \item \textbf{Développement assisté} : Claude Code avec agents spécialisés (signal-chain, mfcc-expert, ml-expert, hardware)
+    \item \textbf{Prototypage Python} : NumPy, SciPy, Matplotlib, TensorFlow/Keras
+    \item \textbf{Validation} : Audacity, oscilloscope Siglent, générateur de fonctions
+    \item \textbf{Rédaction} : LaTeX
+\end{itemize}
+
+\subsection{Difficultés rencontrées}
+
+\TODO{Lister les difficultés rencontrées au fil du projet et leur résolution. Exemples :
+\begin{itemize}
+    \item Configuration ADC trigger par TC --- registres SAM3X8E peu documentés côté Arduino
+    \item \TODO{autres}
+\end{itemize}
+Cette section est valorisée par le jury --- montre l'honnêteté et la capacité d'analyse.}
+
+\subsection{Bilan de la démarche}
+
+\TODO{Synthèse : ce qui a bien marché, ce qui pourrait être amélioré en termes de méthodologie (p.ex. tests plus précoces, meilleure communication).}
+
+\newpage
