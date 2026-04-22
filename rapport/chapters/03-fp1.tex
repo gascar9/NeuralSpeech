@@ -93,8 +93,8 @@ void TC0_Handler() {
 
 \begin{figure}[H]
 \centering
-\includegraphics[width=0.8\linewidth]{FP1/FP1Oscilloscope2.jpeg}
-\caption{Oscilloscope : sinusoïde \SI{1}{\kilo\hertz} (CH2, violet) injectée sur A0, reconstruction par DAC0 (CH1, jaune). La fréquence est correctement préservée.}
+\includegraphics[width=0.75\linewidth]{FP1/fp1_reconstruction_1kHz.jpeg}
+\caption{Oscilloscope : sinusoïde \SI{1}{\kilo\hertz} en entrée (CH1, jaune) et reconstruction par DAC0 (CH2, violet). Mesure automatique $\texttt{Freq}_{\text{CH1}} = \SI{1.00}{\kilo\hertz}$, déphasage de \SI{58}{\degree} entre les deux traces (retard structurel de la chaîne ADC $\rightarrow$ buffer $\rightarrow$ DAC, cohérent avec le budget de plusieurs périodes d'échantillonnage).}
 \label{fig:fp1-oscillo-1khz}
 \end{figure}
 
@@ -107,28 +107,46 @@ void TC0_Handler() {
 \label{fig:fp1-banc}
 \end{figure}
 
-\paragraph{Valeurs ADC brutes sur console série.} La figure~\ref{fig:fp1-adc} montre la progression des valeurs ADC à chaque échantillon : on observe une sinusoïde discrétisée (amplitude ADC $\approx$ 1015 unités, soit $\SI{0.82}{\volt_{pp}}$), sans saut ni échantillon manquant, confirmant le bon fonctionnement du buffer circulaire.
+\paragraph{Mesure de $F_e$ par la console série.} La figure~\ref{fig:fp1-console} montre un extrait de la sortie série pendant plusieurs dizaines de secondes en mode \emph{FP1~pure} (environnement PlatformIO \texttt{due\_fp1}, filtre désactivé). La fréquence d'échantillonnage réelle, calculée par la Due en comptant les déclenchements d'interruption TC0 sur une fenêtre d'une seconde, reste verrouillée à :
+\[
+F_e^{\text{réelle}} = \SI{32012}{\hertz} \quad \Rightarrow \quad T_e = \frac{1}{32012} = \SI{31.238}{\micro\second}
+\]
+conforme au calcul théorique $\lfloor 10\,500\,000 / 328 \rfloor$. L'occupation du buffer circulaire (\texttt{buf\_used}) reste entre 1 et 2 échantillons sur 512 : la boucle principale consomme instantanément les échantillons produits par l'ISR, aucun n'est perdu.
 
 \begin{figure}[H]
 \centering
-\includegraphics[width=0.45\linewidth]{FP1/FP1Result.png}
-\caption{Extrait de la console série : valeurs ADC brutes. La progression monotone (montée puis descente) suit fidèlement la sinusoïde injectée.}
-\label{fig:fp1-adc}
+\includegraphics[width=0.85\linewidth]{FP1/FP1Results.png}
+\caption{Extrait de la console série (baudrate \num{250000}, filtre \texttt{time}). La fréquence mesurée reste stable à \SI{32012}{\hertz} sur l'ensemble de la session. La précision de la mesure (comptage sur une seconde) est nettement supérieure à celle d'une mesure au curseur d'oscilloscope ($\pm \SI{0.03}{\micro\second}$ contre $\pm \SI{0.5}{\micro\second}$).}
+\label{fig:fp1-console}
 \end{figure}
 
-\paragraph{Mesure directe de $F_e = \SI{32}{\kilo\hertz}$.} \TODO{Capture oscilloscope au zoom \texttt{M~\SI{5}{\micro\second}/div} sur DAC0 seul. Mesurer au curseur la période entre deux marches successives : valeur attendue \SI{31.25}{\micro\second} $\pm$ \SI{0.5}{\micro\second}. Joindre également la valeur affichée par la console série : \texttt{[FP1] Fe\_reelle=XXXXX Hz}.}
-
-\paragraph{Test du critère de Nyquist.} \TODO{Deux captures à produire :
+\paragraph{Test du critère de Nyquist à la limite $F_e/2$.} La figure~\ref{fig:fp1-nyquist-16khz} montre une injection à exactement \SI{16}{\kilo\hertz}, soit la \emph{limite théorique} de Nyquist pour $F_e = \SI{32}{\kilo\hertz}$. Le signal d'entrée (CH1, jaune) reste bien présent et mesuré. En revanche, la reconstruction par le DAC (CH2, violet) est \emph{complètement dégradée} :
 \begin{itemize}
-    \item Injection à \SI{15}{\kilo\hertz} (inférieur à $F_e/2 = \SI{16}{\kilo\hertz}$) : signal reconstruit à \SI{15}{\kilo\hertz}, visible sur DAC0.
-    \item Injection à \SI{17}{\kilo\hertz} (supérieur à $F_e/2$) : observation du repliement spectral $\rightarrow$ fréquence fantôme à $32 - 17 = \SI{15}{\kilo\hertz}$.
+    \item Amplitude CH2 écrasée à \SI{208}{\milli\volt_{pp}} (contre $\sim$\SI{1}{\volt_{pp}} à \SI{1}{\kilo\hertz})
+    \item Mesure automatique de fréquence CH2 indéterminée (``\texttt{****}'' et ``\texttt{Freq=4.7\,Hz}'' après démodulation) : seuls deux échantillons par période ne suffisent plus à reconstruire l'information de phase
+    \item Trace CH2 visuellement chaotique, modulée en enveloppe par la différence de phase entre échantillonnage et signal
 \end{itemize}
-Cette démonstration valide la nécessité du filtre anti-repliement implémenté en FP2.}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.75\linewidth]{FP1/FP1Oscilloscope16Khz.jpeg}
+\caption{Démonstration de la limite de Nyquist : à \SI{16}{\kilo\hertz} = $F_e/2$, l'entrée CH1 est préservée mais la reconstruction CH2 s'effondre (amplitude divisée par 5, fréquence non identifiable). Cette image illustre que même \emph{à} la limite théorique, la chaîne d'acquisition ne peut plus reconstituer le signal sans ambiguïté --- et motive la nécessité du filtre anti-repliement de FP2 pour éliminer toute composante au-dessus de \SI{4}{\kilo\hertz} avant sous-échantillonnage à \SI{8}{\kilo\hertz}.}
+\label{fig:fp1-nyquist-16khz}
+\end{figure}
 
 \subsection{Bilan FP1}
 
-L'acquisition à \SI{32}{\kilo\hertz} est opérationnelle. L'erreur de fréquence (\num{0.04}\,\%) est largement en dessous des tolérances courantes pour un projet de reconnaissance vocale. L'ISR, mesurée à environ 1~\si{\micro\second} (temps de conversion ADC inclus), laisse un budget confortable pour l'ajout du filtrage numérique en FP2 (budget total $< \SI{31.25}{\micro\second}$ par échantillon, \etref{3}).
+L'acquisition à \SI{32}{\kilo\hertz} est opérationnelle et validée par quatre preuves complémentaires :
 
-\paragraph{Ressources utilisées.} Après compilation, l'empreinte firmware est de \num{3680}\,octets de SRAM (\num{3.7}\,\%) et \num{25488}\,octets de Flash (\num{4.9}\,\%), sans optimisation particulière.
+\begin{enumerate}
+    \item \textbf{Preuve algorithmique} (code) : configuration explicite de TC0 avec $\text{RC}=328$ dans \texttt{configureTC0()}.
+    \item \textbf{Preuve numérique} (console) : $F_e^{\text{réelle}} = \SI{32012}{\hertz}$ stable (erreur \num{0.04}\,\% par rapport à la cible \SI{32}{\kilo\hertz}) --- figure~\ref{fig:fp1-console}.
+    \item \textbf{Preuve fonctionnelle} (oscilloscope) : chaîne ADC $\rightarrow$ DAC fidèle à \SI{1}{\kilo\hertz}, forme et fréquence préservées --- figure~\ref{fig:fp1-oscillo-1khz}.
+    \item \textbf{Preuve pédagogique} (oscilloscope) : à la limite de Nyquist ($F_e/2 = \SI{16}{\kilo\hertz}$), la reconstruction s'effondre --- figure~\ref{fig:fp1-nyquist-16khz}. Cette observation motive directement l'ajout du filtre anti-repliement FP2.
+\end{enumerate}
+
+L'ISR, dont le coût est dominé par l'attente de fin de conversion ADC ($\sim$84 cycles = \SI{1}{\micro\second}), laisse un budget confortable pour l'ajout du filtrage numérique en FP2 (budget total $< \SI{31.25}{\micro\second}$ par échantillon, \etref{3}).
+
+\paragraph{Ressources utilisées.} Après compilation en environnement \texttt{due\_fp1} (filtre désactivé) : \num{3680}\,octets de SRAM (\num{3.7}\,\%) et $\sim$\num{21000}\,octets de Flash ($\sim$\num{4}\,\%). L'environnement \texttt{due} (FP1+FP2 combinés) étend ces chiffres à \num{8060}\,octets SRAM (\num{8.2}\,\%) et \num{26516}\,octets Flash (\num{5.1}\,\%).
 
 \newpage
