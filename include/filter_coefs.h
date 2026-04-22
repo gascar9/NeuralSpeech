@@ -18,7 +18,26 @@
 
 constexpr size_t FILTER_TAPS = 97U;
 
-// Coefficients symetriques (phase lineaire garantie)
+// Q15 fixed-point (utilise en runtime — MAC entier, pas de FPU)
+// coef_q15[k] = round(coef_float[k] * 32767), sature dans [-32768, 32767]
+// Dynamique accumulateur int32 : pire cas = 122729932 (marge x17.50 avant overflow)
+constexpr int16_t FILTER_COEFS_Q15[FILTER_TAPS] = {
+    13, 18, 15, 4, -11, -24, -27, -16,
+    7, 33, 48, 41, 9, -37, -76, -83,
+    -47, 25, 101, 141, 114, 20, -107, -204,
+    -214, -111, 72, 256, 342, 265, 31, -267,
+    -487, -495, -242, 196, 631, 832, 636, 40,
+    -753, -1388, -1472, -735, 836, 2959, 5116, 6723,
+    7316, 6723, 5116, 2959, 836, -735, -1472, -1388,
+    -753, 40, 636, 832, 631, 196, -242, -495,
+    -487, -267, 31, 265, 342, 256, 72, -111,
+    -214, -204, -107, 20, 114, 141, 101, 25,
+    -47, -83, -76, -37, 9, 41, 48, 33,
+    7, -16, -27, -24, -11, 4, 15, 18,
+    13
+};
+
+// Float (reference debug uniquement — non utilise en runtime)
 constexpr float FILTER_COEFS[FILTER_TAPS] = {
     0.0003963362f, 0.0005476256f, 0.0004514226f, 0.0001182066f,
     -0.0003391817f, -0.0007236405f, -0.0008187530f, -0.0004924387f,

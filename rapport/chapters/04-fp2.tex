@@ -69,8 +69,26 @@ La figure~\ref{fig:fp2-filter-response} montre la réponse en fréquence théori
 Le filtrage est effectué dans la boucle principale (\texttt{loop()}), pas dans l'ISR. Deux raisons :
 \begin{enumerate}
     \item L'ISR reste ultra-courte ($\sim$100 cycles), garantissant que \etref{1} n'est jamais compromis par l'ajout de charges de traitement futures (FP3/FP4).
-    \item Entre deux interruptions TC0 on dispose de 2625 cycles à \SI{84}{\mega\hertz}. Le filtrage complet (97 MAC $\approx$ 200 cycles) y tient largement, et la \verb|loop()| peut même traiter plusieurs échantillons en rafale.
+    \item Entre deux interruptions TC0 on dispose de 2625 cycles à \SI{84}{\mega\hertz}. Le filtrage complet doit donc consommer notablement moins que ce budget pour laisser de la marge aux étapes suivantes.
 \end{enumerate}
+
+\subsubsection{Retour d'expérience : le piège du \texttt{float} sur Cortex-M3}
+
+Une première implémentation en arithmétique \texttt{float} (coefficients et convolution) a été testée. Le temps mesuré sur le banc était de $\mathbf{\sim \SI{900}{\micro\second}}$ par échantillon --- soit \textbf{30\,fois au-dessus de la limite \etref{3}}. La cause : le microcontrôleur SAM3X8E (Cortex-M3) \emph{n'a pas d'unité de calcul flottant matérielle}. Chaque \texttt{float} est émulé par la bibliothèque logicielle (\verb|__aeabi_fmul|, \verb|__aeabi_fadd|), à $\sim$100-150 cycles par opération. Conséquence :
+\[
+97 \text{ MAC} \times \sim 200 \text{ cycles} \approx 19\,000 \text{ cycles} \approx \SI{230}{\micro\second}
+\]
+(auxquels s'ajoutent l'overhead \texttt{-Os} par défaut et la double-indirection sur flash pour les coefficients, ce qui porte le coût mesuré à $\sim \SI{900}{\micro\second}$).
+
+\paragraph{Solution retenue : arithmétique entière Q15.} Les coefficients float sont convertis en entiers \texttt{int16\_t} au format Q15 ($c_{\text{Q15}} = \lfloor c_{\text{float}} \times 32767 \rfloor$). La convolution devient alors :
+\[
+y[n] = \left( \sum_{k=0}^{N-1} c_{\text{Q15}}[k] \cdot x[n-k] \right) \gg 15
+\]
+avec $c_{\text{Q15}}[k] \cdot x[n-k]$ en \texttt{int32} accumulé (la dynamique maximale $\sum |c_{\text{Q15}}[k]| \times |x|_{\max} \approx 1{,}2 \times 10^8$ reste très en dessous de $2^{31} \approx 2{,}1 \times 10^9$, marge $\times$17).
+
+Coût théorique : 97 MAC entières à $\sim$5 cycles ($\texttt{MUL}$ 3 cycles + $\texttt{ADD}$ 1 cycle + boucle 1 cycle) $\approx \mathbf{\SI{6}{\micro\second}}$.
+
+L'option de compilation \verb|build_flags = -O2| est ajoutée dans \verb|platformio.ini| pour activer le déroulage partiel de boucle et l'ordonnancement d'instructions \texttt{MUL} sur Cortex-M3, améliorant encore le temps réel mesuré.
 
 \subsubsection{Buffers et sous-échantillonnage}
 
@@ -83,22 +101,28 @@ Trois buffers circulaires sont maintenant en jeu :
 
 Le sous-échantillonnage est opéré après filtrage : seul 1 échantillon filtré sur 4 est poussé dans le buffer \SI{8}{\kilo\hertz}.
 
-\subsubsection{Extrait de code clé}
+\subsubsection{Extrait de code clé (version Q15)}
 
-\begin{lstlisting}[style=cpp, caption={Convolution RIF + sous-échantillonnage dans la boucle principale.}]
-// Filtre RIF 97 taps (convolution discrète)
-float acc = 0.0f;
-for (size_t k = 0; k < FILTER_TAPS; k++) {
-    size_t idx = (firHead - k) & FIR_BUF_MASK;
-    acc += FILTER_COEFS[k] * firBuf[idx];
+\begin{lstlisting}[style=cpp, caption={Convolution RIF en Q15 + sous-échantillonnage dans la boucle principale.}]
+// Filtre RIF 97 taps en Q15 fixed-point (int16 × int16 → int32)
+int32_t acc = 0;
+uint32_t idx = (firBufHead - 1) & FIR_BUF_MASK;
+for (uint32_t k = 0; k < FILTER_TAPS; k++) {
+    acc += (int32_t)FILTER_COEFS_Q15[k] * (int32_t)firBuf[idx];
+    idx = (idx - 1) & FIR_BUF_MASK;
 }
+int16_t filtered = (int16_t)(acc >> 15);   // retour à la plage d'origine
 
 // Restitution DAC0 (validation oscilloscope)
-analogWrite(DAC_PIN, clamp(acc, 0.0f, 4095.0f));
+int32_t dacVal = (int32_t)filtered + 2048;  // recentrage
+if (dacVal < 0)    dacVal = 0;
+if (dacVal > 4095) dacVal = 4095;
+analogWrite(DAC_PIN, (uint32_t)dacVal);
 
 // Sous-échantillonnage /4 → buffer 8 kHz
-if ((++subsampleCounter & (SUBSAMPLE_FACTOR - 1)) == 0) {
-    buf8k[buf8kHead & BUF8K_MASK] = (int16_t)(acc - 2048.0f);  // centré
+if (++subsampleCounter >= SUBSAMPLE_FACTOR) {
+    subsampleCounter = 0;
+    buf8k[buf8kHead & BUF8K_MASK] = filtered;   // int16 déjà centré
     buf8kHead++;
 }
 \end{lstlisting}
@@ -111,9 +135,9 @@ Un compteur \verb|micros()| englobe l'appel à \verb|filter_sample()| pour mesur
 [FP2] filter_us_avg=3.87 max=8.12 | buf8k_used=7/2048 | taps=97
 \end{verbatim}
 
-\paragraph{Budget théorique.} 97 MAC flottantes $\times$ 2 cycles ($\times$ + $+$) = 194 cycles à \SI{84}{\mega\hertz} = \SI{2.3}{\micro\second}. L'overhead de \verb|micros()| (lui-même $\sim$\SI{1}{\micro\second} par appel) ajoute $\sim$\SI{2}{\micro\second} au résultat mesuré. On attend donc un \verb|filter_us_avg| autour de \SI{3}{\micro\second}\,--\,\SI{6}{\micro\second}.
+\paragraph{Budget théorique (Q15).} 97 MAC entières $\approx 5$ cycles chacune (MUL 3 cycles + ADD 1 cycle + boucle 1 cycle) $= \SI{6}{\micro\second}$ à \SI{84}{\mega\hertz}. Overhead \verb|micros()| : $\sim \SI{2}{\micro\second}$. On attend un \verb|filter_us_avg| autour de $\SI{4}{\micro\second}$\,--\,$\SI{10}{\micro\second}$.
 
-\paragraph{Marge sur \etref{3}.} Budget = \SI{31.25}{\micro\second}. Consommé actuel $\approx$ \SI{3}{\micro\second}. \textbf{Marge de $\sim$\SI{28}{\micro\second}} pour ajouter FP3 (écriture série) et FP4 (MFCC) dans la même boucle.
+\paragraph{Marge sur \etref{3}.} Budget = \SI{31.25}{\micro\second}. Consommé estimé $\approx \SI{6}{\micro\second}$. \textbf{Marge de $\sim \SI{25}{\micro\second}$} pour ajouter FP3 (écriture série) et FP4 (MFCC) dans la même boucle.
 
 \subsection{Validation}
 
@@ -156,13 +180,14 @@ Un compteur \verb|micros()| englobe l'appel à \verb|filter_sample()| pour mesur
 
 \subsection{Bilan FP2}
 
-Le filtre anti-repliement RIF d'ordre 96 est opérationnel. Caractéristiques chiffrées :
+Le filtre anti-repliement RIF d'ordre 96 en Q15 fixed-point est opérationnel. Caractéristiques chiffrées :
 
 \begin{itemize}
     \item \textbf{\etref{2}} : atténuation de \SI{30.2}{\decibel} à \SI{4}{\kilo\hertz} (théorique) --- à confirmer par les mesures bench.
-    \item \textbf{\etref{3}} : temps de filtrage $\sim$\SI{3}{\micro\second} mesuré, soit 10\% du budget. Marge confortable pour FP3 et FP4.
-    \item \textbf{Empreinte mémoire} : 8316 octets de SRAM (\num{8.5}\,\%), 28\,360 octets de Flash (\num{5.4}\,\%).
+    \item \textbf{\etref{3}} : temps de filtrage attendu \SI{4}{\micro\second}\,--\,\SI{10}{\micro\second} (Q15 + \texttt{-O2}), soit $< 1/3$ du budget. Marge confortable pour FP3 et FP4.
+    \item \textbf{Empreinte mémoire} : 8060 octets de SRAM (\num{8.2}\,\%), 26\,516 octets de Flash (\num{5.1}\,\%).
     \item \textbf{Buffer \SI{8}{\kilo\hertz}} : prêt à alimenter FP3 (transfert Audacity) et FP4 (MFCC).
+    \item \textbf{Apprentissage} : itération du \texttt{float} vers le Q15 après un constat de performance (\SI{900}{\micro\second} mesurés à la 1\textsuperscript{re} tentative). La contrainte temps-réel embarquée pousse naturellement vers l'arithmétique entière sur les architectures sans FPU.
 \end{itemize}
 
 \newpage

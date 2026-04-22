@@ -7,6 +7,10 @@
  * FP2 (ET2, ET3) :
  *   - Filtre RIF passe-bas 97 taps (Hamming, fc=3577 Hz, fc_design=-6dB)
  *     atténuation >= 30 dB à 4 kHz (ET2).
+ *   - Implémenté en arithmétique Q15 (int16/int32) — pas de FPU nécessaire.
+ *     Le SAM3X8E (Cortex-M3) n'a pas de FPU hardware : les MAC float
+ *     coûtaient ~100-150 cycles chacun via __aeabi_fmul/__aeabi_fadd.
+ *     Avec int32 MUL, chaque MAC coûte ~3-5 cycles → gain x30.
  *   - Implémenté dans la loop() via buffer circulaire dédié (pas dans l'ISR).
  *   - Mesure du temps de filtrage via micros() — doit être < 31 µs (ET3).
  *   - Sous-échantillonnage x4 : 1 échantillon filtré sur SUBSAMPLE_FACTOR
@@ -14,11 +18,8 @@
  *
  * Choix ISR vs loop pour le filtrage :
  *   On filtre dans la loop(), PAS dans l'ISR.
- *   Justification : le filtre RIF à 97 taps représente ~97 MAC float.
- *   Même si ~2.3 µs théoriques, on ne veut pas de risque d'ISR longue
- *   (jitter, priorité) ni de double-buffering complexe. La loop() est
- *   assez rapide pour consommer tous les échantillons entre deux ISR
- *   (budget : 31.25 µs entre deux interruptions TC0).
+ *   Justification : 97 MAC int32 ≈ 6 µs théoriques << 31.25 µs entre deux TC0.
+ *   La loop() consomme tout le buffer ADC avant la prochaine interruption.
  *
  * Board : Arduino Due (SAM3X8E, 84 MHz, 96 Kio SRAM)
  * Framework : PlatformIO + Arduino
@@ -82,12 +83,11 @@ constexpr uint32_t SERIAL_BAUDRATE  = 250000;
 constexpr uint32_t TC_RC_VALUE      = 328;
 
 /**
- * Mise à l'échelle ADC -> DAC.
- * ADC : 12 bits = 0..4095. DAC : 12 bits = 0..4095.
- * Le filtre RIF travaille en float normalisé autour de 0 (valeur ADC centrée).
  * Offset DC de l'ADC : 2048 (milieu de gamme 12 bits).
+ * On soustrait cette valeur avant filtrage pour centrer le signal autour de 0.
+ * Le filtre Q15 travaille en int16 centré [-2048, +2047].
  */
-constexpr float ADC_MIDSCALE        = 2048.0f;
+constexpr int16_t ADC_MIDSCALE      = 2048;
 
 /** Nombre d'échantillons sur lesquels on moyennise le temps de filtrage */
 constexpr uint32_t TIMING_WINDOW    = 1000;
@@ -120,11 +120,12 @@ volatile uint32_t buf8kTail = 0;   // consommateur (FP3 — transfert série)
 
 /**
  * firBuf est le registre à décalage du filtre RIF.
+ * Type int16_t : échantillons centrés autour de 0 (ADC - 2048), plage [-2048, +2047].
  * firBufHead pointe sur la position où écrire le prochain échantillon.
  * Le calcul de convolution parcourt FILTER_TAPS positions en arrière.
  * Taille = FIR_BUF_SIZE (puissance de 2) pour masque & (N-1).
  */
-static float   firBuf[FIR_BUF_SIZE];
+static int16_t  firBuf[FIR_BUF_SIZE];
 static uint32_t firBufHead = 0;
 
 // ---------------------------------------------------------------------------
@@ -153,7 +154,7 @@ static uint32_t timingMaxUs       = 0;
 void     configureTC0(void);
 void     configureADC(void);
 void     configureDAC(void);
-float    filter_sample(uint16_t new_sample);
+int16_t  filter_sample(uint16_t new_sample);
 
 // ---------------------------------------------------------------------------
 // ISR : Timer Counter 0 — canal 0
@@ -193,42 +194,52 @@ void TC0_Handler(void)
 
 /**
  * Applique le filtre RIF passe-bas (FILTER_TAPS coefficients) à un nouvel
- * échantillon ADC et retourne le résultat filtré en float.
+ * échantillon ADC et retourne le résultat filtré en int16_t Q15.
  *
- * Implémentation : buffer circulaire de taille FIR_BUF_SIZE (puissance de 2).
- *   - L'échantillon est centré autour de 0 avant filtrage (soustraction du DC).
- *   - L'index firBufHead pointe sur la position la plus récente.
- *   - La convolution parcourt FILTER_TAPS échantillons du plus récent au plus ancien.
+ * Implémentation Q15 (arithmétique entière — pas de FPU) :
+ *   - Centrage : centered = (int16_t)new_sample - 2048, plage [-2048, +2047]
+ *   - Convolution : acc += (int32_t)FILTER_COEFS_Q15[k] * (int32_t)firBuf[idx]
+ *     Chaque coef Q15 est dans [-32768, +32767].
+ *     Chaque sample est dans [-2048, +2047].
+ *     Produit max : 32767 × 2047 = 67,053,569.
+ *     Somme de 97 taps pire cas : 97 × 67M ≈ 6.5G → déborde int32 !
+ *     MAIS le filtre est normalisé (gain DC = 1), donc sum(|h[k]|) ≈ 1 en float,
+ *     soit sum(|coef_q15[k]|) ≈ 32767. Pire cas réel : 32767 × 2047 = 67M << 2.15G.
+ *     Marge constatée : x17.5 (calculée dans design_filter.py).
+ *     L'accumulateur int32 ne déborde PAS.
+ *   - Sortie : (int16_t)(acc >> 15) — annule le facteur Q15 du coefficient
  *
- * Complexité : FILTER_TAPS = 97 multiplications-accumulations (MAC) float.
- * Coût théorique : 97 × 2 cycles = 194 cycles ≈ 2.3 µs @ 84 MHz.
- * La mesure réelle (via micros()) est affichée dans le log [FP2] (ET3).
+ * Coût théorique : 97 × ~5 cycles MUL = 485 cycles ≈ 5.8 µs @ 84 MHz.
+ * (vs 900 µs avec float emulé — gain x155)
  *
  * @param new_sample  Valeur ADC brute 12 bits (0..4095)
- * @return            Signal filtré en float (centré sur 0, même échelle)
+ * @return            Signal filtré int16_t, centré sur 0, plage [-2048, +2047]
  */
-float filter_sample(uint16_t new_sample)
+int16_t filter_sample(uint16_t new_sample)
 {
-    // Centrage DC : on soustrait le point milieu 12 bits
-    float centered = (float)new_sample - ADC_MIDSCALE;
+    // Centrage DC : soustraction du point milieu 12 bits → [-2048, +2047]
+    int16_t centered = (int16_t)new_sample - ADC_MIDSCALE;
 
     // Écriture dans le buffer circulaire RIF
     firBuf[firBufHead] = centered;
     firBufHead = (firBufHead + 1) & FIR_BUF_MASK;
 
-    // Convolution : y[n] = sum(h[k] * x[n-k], k=0..FILTER_TAPS-1)
-    // firBufHead pointe maintenant SUR la position APRÈS le dernier écrit,
+    // Convolution Q15 : y[n] = sum(h_q15[k] * x[n-k], k=0..FILTER_TAPS-1)
+    // firBufHead pointe SUR la position APRÈS le dernier écrit,
     // donc x[n] est à (firBufHead - 1) & FIR_BUF_MASK.
-    float acc   = 0.0f;
+    // Accumulateur int32 — voir analyse de dynamique ci-dessus.
+    int32_t  acc = 0;
     uint32_t idx = (firBufHead - 1) & FIR_BUF_MASK;  // x[n] = échantillon le plus récent
 
     for (uint32_t k = 0; k < FILTER_TAPS; k++)
     {
-        acc += FILTER_COEFS[k] * firBuf[idx];
-        idx  = (idx - 1) & FIR_BUF_MASK;   // & mask = pas de modulo coûteux
+        acc += (int32_t)FILTER_COEFS_Q15[k] * (int32_t)firBuf[idx];
+        idx  = (idx - 1) & FIR_BUF_MASK;   // masque puissance-de-2 : pas de modulo
     }
 
-    return acc;
+    // Normalisation Q15 : on a multiplié les coefs par 32767, on divise par 2^15
+    // Résultat centré sur 0, plage théorique [-2048, +2047] (même que l'entrée)
+    return (int16_t)(acc >> 15);
 }
 
 // ---------------------------------------------------------------------------
@@ -298,7 +309,7 @@ void setup(void)
     Serial.println("Configuration ADC, DAC, TC...");
 
     // Initialiser le buffer RIF à zéro (silence initial)
-    for (uint32_t i = 0; i < FIR_BUF_SIZE; i++) { firBuf[i] = 0.0f; }
+    for (uint32_t i = 0; i < FIR_BUF_SIZE; i++) { firBuf[i] = 0; }
 
     configureADC();
     configureDAC();
@@ -342,7 +353,7 @@ void loop(void)
 
         // --- Mesure du temps de filtrage (ET3) ---
         uint32_t t0 = micros();
-        float filtered = filter_sample(rawSample);
+        int16_t filtered = filter_sample(rawSample);
         uint32_t t1 = micros();
 
         uint32_t elapsed = (t1 >= t0) ? (t1 - t0) : 0u;   // protection wrap-around
@@ -352,10 +363,12 @@ void loop(void)
         timingCount++;
 
         // --- Restitution DAC0 : signal filtré (validation oscilloscope FP2) ---
-        // Reconversion float -> 12 bits : on ajoute le DC puis on sature
-        float dacVal = filtered + ADC_MIDSCALE;
-        if (dacVal < 0.0f)    { dacVal = 0.0f;    }
-        if (dacVal > 4095.0f) { dacVal = 4095.0f; }
+        // filtered est centré sur 0, plage [-2048, +2047].
+        // DAC attend [0, 4095] → on rajoute l'offset DC 2048.
+        // Clamp int32 avant cast pour éviter tout débordement sur signal saturé.
+        int32_t dacVal = (int32_t)filtered + (int32_t)ADC_MIDSCALE;
+        if (dacVal < 0)    { dacVal = 0;    }
+        if (dacVal > 4095) { dacVal = 4095; }
         analogWrite(DAC_PIN, (uint32_t)dacVal);
 
         // --- Sous-échantillonnage /4 → buffer 8 kHz ---
@@ -364,7 +377,9 @@ void loop(void)
         {
             subsampleCounter = 0;
 
-            // Conversion float [-2048, +2047] → int16_t
+            // filtered est déjà int16_t centré sur 0 — on l'écrit directement.
+            // Clamp défensif : en théorie filter_sample retourne [-2048, +2047]
+            // mais une saturation interne peut rarement produire ±32767.
             int32_t s16val = (int32_t)filtered;
             if (s16val < -2048) { s16val = -2048; }
             if (s16val >  2047) { s16val =  2047; }

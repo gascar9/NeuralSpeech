@@ -154,7 +154,39 @@ with open(HEADER_PATH, "w") as f:
     f.write("#pragma once\n")
     f.write("#include <stddef.h>\n\n")
     f.write(f"constexpr size_t FILTER_TAPS = {TAPS_COUNT}U;\n\n")
-    f.write("// Coefficients symetriques (phase lineaire garantie)\n")
+
+    # --- Coefficients Q15 (int16) : utilises en runtime ---
+    # Conversion : coef_q15 = round(coef_float * 32767), sature dans [-32768, 32767]
+    coefs_q15 = np.clip(np.round(selected_coefs * 32767.0).astype(np.int64),
+                        -32768, 32767).astype(np.int32)
+
+    # Verification dynamique accumulateur int32
+    # Pire cas theorique : sum(|coef_q15[k]| * max_sample), max_sample = 2047 (12 bits centre)
+    max_acc_theoretical = int(np.sum(np.abs(coefs_q15)) * 2047)
+    INT32_MAX = 2_147_483_647
+    overflow_margin = INT32_MAX / max(max_acc_theoretical, 1)
+
+    f.write("// Q15 fixed-point (utilise en runtime — MAC entier, pas de FPU)\n")
+    f.write("// coef_q15[k] = round(coef_float[k] * 32767), sature dans [-32768, 32767]\n")
+    f.write(f"// Dynamique accumulateur int32 : pire cas = {max_acc_theoretical} "
+            f"(marge x{overflow_margin:.2f} avant overflow)\n")
+    f.write("constexpr int16_t FILTER_COEFS_Q15[FILTER_TAPS] = {\n")
+
+    for i, c in enumerate(coefs_q15):
+        is_last = (i == TAPS_COUNT - 1)
+        comma   = "" if is_last else ","
+        indent  = "    " if (i % 8 == 0) else ""
+        end_of_group = (i % 8 == 7) or is_last
+        f.write(f"{indent}{int(c)}{comma}")
+        if end_of_group:
+            f.write("\n")
+        else:
+            f.write(" ")
+
+    f.write("};\n\n")
+
+    # --- Coefficients float (reference, non utilises en runtime) ---
+    f.write("// Float (reference debug uniquement — non utilise en runtime)\n")
     f.write("constexpr float FILTER_COEFS[FILTER_TAPS] = {\n")
 
     for i, c in enumerate(selected_coefs):

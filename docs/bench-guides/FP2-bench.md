@@ -132,11 +132,15 @@ plt.savefig('rapport/figures/FP2/fp2-freq-response-measured.png', dpi=150)
 2. Noter la valeur max la plus haute vue.
 3. Injection d'un signal fort (2 Vpp, sinus 2 kHz) pour stresser un peu.
 
-**Résultat attendu** : `avg ≈ 3–5 µs`, `max < 15 µs`.
+**Résultat attendu (après passage Q15)** : `avg ≈ 4–8 µs`, `max < 15 µs`.
+
+**Historique (à savoir pour la soutenance)** : une première version en arithmétique `float` donnait ~900 µs (softfloat émulé sur Cortex-M3 sans FPU). Le passage en Q15 fixed-point (coefficients int16, convolution int32) ramène le temps à ~6 µs. C'est une **leçon typique de DSP embarqué** valorisable dans le rapport et en soutenance : "sur Cortex-M3 sans FPU, tout DSP en temps réel doit passer par du fixed-point".
 
 **📸 Capture** : capture écran du monitor série avec plusieurs lignes `[FP2]` visibles. `assets/FP2/fp2_timing_serial.png`.
 
 **⚠️ Si `max` dépasse 20 µs** : un autre code a été ajouté dans la loop. Regarder si quelqu'un a ajouté un `Serial.print` quelque part dans le chemin critique.
+
+**⚠️ Si `max` dépasse 100 µs** : vérifier que `include/filter_coefs.h` contient bien `FILTER_COEFS_Q15[]` et que `src/main.cpp` l'utilise (pas `FILTER_COEFS[]` float). Rebuild : `pio run --target upload`.
 
 ---
 
