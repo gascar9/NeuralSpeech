@@ -29,6 +29,18 @@
 #include "filter_coefs.h"   // FILTER_TAPS, FILTER_COEFS — généré par design_filter.py
 
 // ---------------------------------------------------------------------------
+// Registres DWT Cortex-M3 (Data Watchpoint & Trace — Cycle Counter)
+// ---------------------------------------------------------------------------
+// Adresses ARM standard, non exposées par le core Arduino-SAM.
+// DWT->CYCCNT est un compteur 32 bits qui incrémente à chaque cycle CPU
+// (F_CPU = 84 MHz → wrap tous les 51 s). Lecture 1 cycle, zéro overhead.
+#define DWT_CTRL     (*(volatile uint32_t*)0xE0001000)
+#define DWT_CYCCNT   (*(volatile uint32_t*)0xE0001004)
+#define SCB_DEMCR    (*(volatile uint32_t*)0xE000EDFC)
+#define DEMCR_TRCENA            (1u << 24)
+#define DWT_CTRL_CYCCNTENA      (1u << 0)
+
+// ---------------------------------------------------------------------------
 // Constantes de configuration — aucun magic number ailleurs dans le code
 // ---------------------------------------------------------------------------
 
@@ -317,6 +329,14 @@ void setup(void)
     // Initialiser le buffer RIF à zéro (silence initial)
     for (uint32_t i = 0; i < FIR_BUF_SIZE; i++) { firBuf[i] = 0; }
 
+    // Activation du DWT Cycle Counter (compteur hardware Cortex-M3)
+    // Permet de mesurer la duree de filter_sample() au cycle pres,
+    // sans l'overhead de ~30 µs de micros() (qui fait un retry-loop
+    // sensible aux interruptions TC0).
+    SCB_DEMCR |= DEMCR_TRCENA;       // active trace unit
+    DWT_CYCCNT  = 0;                 // reset compteur
+    DWT_CTRL   |= DWT_CTRL_CYCCNTENA; // enable cycle counter
+
     configureADC();
     configureDAC();
     configureTC0();
@@ -366,15 +386,23 @@ void loop(void)
         int16_t filtered = (int16_t)((int32_t)rawSample - (int32_t)ADC_MIDSCALE);
         analogWrite(DAC_PIN, (uint32_t)rawSample);  // DAC = ADC brut direct
 #else
-        // --- Mesure du temps de filtrage (ET3) ---
-        uint32_t t0 = micros();
+        // --- Mesure du temps de filtrage via DWT Cycle Counter (ET3) ---
+        // DWT->CYCCNT s'incrémente à chaque cycle CPU (F_CPU = 84 MHz).
+        // Lecture en 1 cycle hardware, zéro impact sur les ISR, précision
+        // au cycle près. Contrairement à micros() qui prend ~20-30 µs sur
+        // Due à cause de son retry-loop sensible aux interruptions.
+        uint32_t c0 = DWT_CYCCNT;
         int16_t filtered = filter_sample(rawSample);
-        uint32_t t1 = micros();
+        uint32_t c1 = DWT_CYCCNT;
 
-        uint32_t elapsed = (t1 >= t0) ? (t1 - t0) : 0u;   // protection wrap-around
+        // Différence de cycles (soustraction non-signée gère le wrap 32 bits)
+        uint32_t elapsedCycles = c1 - c0;
 
-        timingAccumUs += elapsed;
-        if (elapsed > timingMaxUs) { timingMaxUs = elapsed; }
+        // Conversion cycles → centièmes de µs : (cycles * 100) / 84
+        uint32_t elapsedUs_x100 = (elapsedCycles * 100UL) / 84UL;
+
+        timingAccumUs += elapsedUs_x100;
+        if (elapsedUs_x100 > timingMaxUs) { timingMaxUs = elapsedUs_x100; }
         timingCount++;
 
         // --- Restitution DAC0 : signal filtré (validation oscilloscope FP2) ---
@@ -439,13 +467,13 @@ void loop(void)
         // Log FP2 (ET3)
         if (timingCount > 0)
         {
-            // Calcul en virgule fixe entière pour éviter les float dans le log
-            // On multiplie par 100 pour obtenir des centièmes de µs
-            uint32_t avgUs_x100 = (timingAccumUs * 100UL) / timingCount;
+            // timingAccumUs et timingMaxUs sont déjà en centièmes de µs
+            // (précalcul via DWT Cycle Counter dans la loop)
+            uint32_t avgUs_x100 = timingAccumUs / timingCount;
             uint32_t avgInt     = avgUs_x100 / 100;
             uint32_t avgFrac    = avgUs_x100 % 100;
 
-            uint32_t maxUs_x100 = timingMaxUs * 100UL;
+            uint32_t maxUs_x100 = timingMaxUs;
             uint32_t maxInt     = maxUs_x100 / 100;
             uint32_t maxFrac    = maxUs_x100 % 100;
 
