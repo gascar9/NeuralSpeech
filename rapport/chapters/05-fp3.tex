@@ -16,19 +16,19 @@ FP3 est une \textbf{fonction de validation} : elle ne produit aucune donnée con
 
 \subsubsection{Pipeline d'enregistrement déclenché par bouton}
 
-Le pipeline ajoute un étage post-\texttt{buf8k} qui, sur appui d'un bouton utilisateur, capture 3~secondes d'audio et la transfère en binaire vers le PC :
+Le pipeline ajoute un étage post-\texttt{buf8k} qui, sur appui d'un bouton utilisateur, capture 1~seconde d'audio et la transfère en binaire vers le PC :
 
 \begin{center}
 \begin{tabular}{c}
 Micro MAX9814 $\rightarrow$ ADC (FP1) $\rightarrow$ Filtre + décim. (FP2) $\rightarrow$ \texttt{buf8k} \\
 $\downarrow$ \\
-\textbf{[bouton D2 pressé]} $\rightarrow$ \texttt{captureBuffer[24000]} \\
+\textbf{[bouton D2 pressé]} $\rightarrow$ \texttt{captureBuffer[8000]} \\
 $\downarrow$ \\
 Dump binaire série $\rightarrow$ Script Python (PC) $\rightarrow$ fichier \texttt{.wav}
 \end{tabular}
 \end{center}
 
-La durée de \SI{3}{\second} est un choix de conception --- plus long que l'\SI{1}{\second} suggéré par le sujet, pour laisser le locuteur prononcer le mot sans pression temporelle et laisser la place à une éventuelle phrase plus longue lors des tests de robustesse.
+La durée de \SI{1}{\second} correspond à l'exigence du sujet et au format attendu pour l'entrée du réseau de neurones (FP4/FP5) : matrice MFCC $62 \times 13$ calculée sur 1~\si{\second} d'audio filtré à \SI{8}{\kilo\hertz}.
 
 \subsubsection{Bouton poussoir sur D2}
 
@@ -40,11 +40,11 @@ La logique d'enregistrement est modélisée par une machine à trois états, imp
 
 \begin{itemize}
     \item \texttt{IDLE} : attente du bouton. La loop continue à exécuter FP1+FP2 normalement.
-    \item \texttt{ARMING} : \texttt{buf8kTail} est aligné sur \texttt{buf8kHead} (flush des échantillons stale), puis les \num{24000} échantillons suivants produits par FP2 sont copiés dans \texttt{captureBuffer[24000]} au fur et à mesure.
-    \item \texttt{DUMPING} : le \texttt{captureBuffer} est envoyé octet par octet sur le port série selon un protocole binaire (voir ci-dessous). La boucle reste non-bloquante grâce à \verb|Serial.availableForWrite()|.
+    \item \texttt{ARMING} : \texttt{buf8kTail} est aligné sur \texttt{buf8kHead} (flush des échantillons stale), puis les \num{8000} échantillons suivants produits par FP2 sont copiés dans \texttt{captureBuffer[8000]} au fur et à mesure.
+    \item \texttt{DUMPING} : le \texttt{captureBuffer} est envoyé octet par octet sur le port série selon un protocole binaire (voir ci-dessous). La boucle reste non-bloquante grâce à \verb|Serial.availableForWrite()|. Pendant cet état, les logs périodiques \texttt{[FP1]}/\texttt{[FP2]} sont \emph{suspendus} pour ne pas injecter de caractères ASCII dans le flux binaire.
 \end{itemize}
 
-Le \texttt{captureBuffer} est un tableau \texttt{int16\_t} de \num{24000} éléments (\SI{48}{\kibi\byte} en SRAM), indépendant du buffer circulaire \texttt{buf8k}. Il agit comme un \emph{snapshot gelé} qu'on peut dumper sereinement sans race condition avec le producteur FP1/FP2 qui continue à produire pendant le transfert.
+Le \texttt{captureBuffer} est un tableau \texttt{int16\_t} de \num{8000} éléments (\SI{16}{\kibi\byte} en SRAM), indépendant du buffer circulaire \texttt{buf8k}. Il agit comme un \emph{snapshot gelé} qu'on peut dumper sereinement sans race condition avec le producteur FP1/FP2 qui continue à produire pendant le transfert.
 
 \subsubsection{Protocole série binaire}
 
@@ -58,18 +58,18 @@ Le fichier \texttt{.wav} final doit contenir des entiers signés 16 bits little-
 \textbf{Champ} & \textbf{Taille} & \textbf{Contenu} \\
 \midrule
 Magic header    & 4 octets  & \texttt{0xAA 0x55 0xAA 0x55} \\
-Nombre samples  & 4 octets  & \texttt{uint32} little-endian ($= \num{24000}$) \\
-PCM payload     & \num{48000} oct & \num{24000} $\times$ \texttt{int16} little-endian \\
+Nombre samples  & 4 octets  & \texttt{uint32} little-endian ($= \num{8000}$) \\
+PCM payload     & \num{16000} oct & \num{8000} $\times$ \texttt{int16} little-endian \\
 Magic footer    & 4 octets  & \texttt{0xDE 0xAD 0xBE 0xEF} \\
 \midrule
-\textbf{Total}  & \textbf{\num{48008} octets} & \\
+\textbf{Total}  & \textbf{\num{16008} octets} & \\
 \bottomrule
 \end{tabularx}
 \caption{Format du bloc binaire FP3 sur le port série.}
 \label{tab:fp3-protocol}
 \end{table}
 
-Durée de transfert : $\num{48008} \times 10 / 250\,000 \approx \SI{1.9}{\second}$ à \num{250000}~bauds (8N1). Le flux atteint \SI{24.4}{\kibi\byte\per\second}, contre \SI{16}{\kibi\byte\per\second} produits par FP2 côté buf8k (à \SI{8}{\kilo\hertz} $\times$ 2~octets) : le lien série est plus rapide que le producteur, pas de goulot d'étranglement (la state machine n'émet qu'après avoir capturé les \num{24000} samples, donc le dump ne rentre pas en concurrence avec la production).
+Durée de transfert : $\num{16008} \times 10 / 250\,000 \approx \SI{0.64}{\second}$ à \num{250000}~bauds (8N1). Le flux atteint \SI{24.4}{\kibi\byte\per\second}, contre \SI{16}{\kibi\byte\per\second} produits par FP2 côté buf8k (à \SI{8}{\kilo\hertz} $\times$ 2~octets) : le lien série est plus rapide que le producteur, pas de goulot d'étranglement (la state machine n'émet qu'après avoir capturé les \num{8000} samples, donc le dump ne rentre pas en concurrence avec la production).
 
 \subsection{Implémentation}
 
@@ -82,12 +82,12 @@ Durée de transfert : $\num{48008} \times 10 / 250\,000 \approx \SI{1.9}{\second
 \toprule
 \textbf{Ajout} & \textbf{Taille} & \textbf{Commentaire} \\
 \midrule
-\texttt{captureBuffer[24000]} \texttt{int16} & \SI{48}{\kibi\byte} & snapshot 3 s d'audio 8 kHz \\
+\texttt{captureBuffer[8000]} \texttt{int16} & \SI{16}{\kibi\byte} & snapshot 1 s d'audio 8 kHz \\
 État machine, index dump, flags bouton & $\sim$32 octets & 7 variables statiques \\
 \midrule
 Total SRAM avant FP3 (env \texttt{due}) & \num{8064} octets & 8.2\,\% \\
-Total SRAM après FP3 (env \texttt{due})  & \textbf{\num{56084} octets} & \textbf{57.1\,\%} \\
-Marge restante & $\sim$\SI{42}{\kibi\byte} & suffisant pour MFCC (FP4) + CNN inference (FP6) \\
+Total SRAM après FP3 (env \texttt{due})  & \textbf{\num{24084} octets} & \textbf{24.5\,\%} \\
+Marge restante & $\sim$\SI{74}{\kibi\byte} & amplement suffisant pour MFCC (FP4) + CNN inference (FP6) \\
 \bottomrule
 \end{tabularx}
 \caption{Bilan mémoire de l'ajout FP3.}
@@ -107,7 +107,7 @@ while time.time() < deadline:
         break
 
 nb_samples = struct.unpack("<I", ser.read(4))[0]
-payload    = ser.read(nb_samples * 2)    # 48000 octets int16 LE
+payload    = ser.read(nb_samples * 2)    # 16000 octets int16 LE
 
 with wave.open(out_path, "wb") as wf:
     wf.setnchannels(1)
