@@ -507,8 +507,15 @@ void fp3_push_sample(int16_t sample)
         dumpIdx      = 0;
         dumpPhase    = 0;
         dumpPhaseIdx = 0;
-        fp3State     = FP3_DUMPING;
+
+        // Flush synchrone du texte avant de commencer le binaire : évite que
+        // le bridge USB-UART ATmega16U2 mélange caractères ASCII et octets
+        // binaires de façon instable sous forte charge.
         Serial.println("\n[FP3] --- DEBUT CAPTURE WAV ---");
+        Serial.flush();   // attend que le texte soit entièrement émis
+        delay(20);        // pause défensive pour que le bridge respire
+
+        fp3State = FP3_DUMPING;
     }
 }
 
