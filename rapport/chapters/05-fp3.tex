@@ -5,52 +5,153 @@ Fonction couverte par l'exigence \etref{4} : \emph{une lecture sur Audacity doit
 
 \subsection{Objectif}
 
-Cette fonction sert de \emph{contrôle de bout en bout} des étages FP1 et FP2 : si l'enregistrement reproduit fidèlement la voix humaine à l'écoute, cela atteste que la numérisation et le filtrage fonctionnent correctement. C'est une fonction de validation, non un bloc fonctionnel du produit final.
+FP3 est une \textbf{fonction de validation} : elle ne produit aucune donnée consommée par le reste du pipeline (FP4/FP5/FP6) mais sert à prouver \emph{auditivement} que FP1 et FP2 fonctionnent correctement. Si un humain reconnaît le mot prononcé à la lecture du \texttt{.wav} généré, alors :
+\begin{itemize}
+    \item L'ADC numérise fidèlement le signal (\etref{1})
+    \item Le filtre passe-bas préserve la bande utile de la voix (\etref{2})
+    \item La chaîne buffer circulaire + sous-échantillonnage ne perd pas d'échantillons (\etref{3})
+\end{itemize}
 
 \subsection{Conception}
 
-\subsubsection{Protocole de transfert}
+\subsubsection{Pipeline d'enregistrement déclenché par bouton}
 
-\TODO{Décrire :
+Le pipeline ajoute un étage post-\texttt{buf8k} qui, sur appui d'un bouton utilisateur, capture 1~seconde d'audio et la transfère en binaire vers le PC :
+
+\begin{center}
+\begin{tabular}{c}
+Micro MAX9814 $\rightarrow$ ADC (FP1) $\rightarrow$ Filtre + décim. (FP2) $\rightarrow$ \texttt{buf8k} \\
+$\downarrow$ \\
+\textbf{[bouton D2 pressé]} $\rightarrow$ \texttt{captureBuffer[8000]} \\
+$\downarrow$ \\
+Dump binaire série $\rightarrow$ Script Python (PC) $\rightarrow$ fichier \texttt{.wav}
+\end{tabular}
+\end{center}
+
+\subsubsection{Bouton poussoir sur D2}
+
+Un bouton poussoir simple entre la broche \texttt{D2} et \texttt{GND}. La résistance de pull-up interne du SAM3X8E est activée (\verb|pinMode(D2, INPUT_PULLUP)|), ce qui évite un composant externe : appui = \texttt{LOW}, relâché = \texttt{HIGH}. Un anti-rebond logiciel de \SI{50}{\milli\second} filtre les transitions parasites. Le déclenchement se fait sur \emph{front descendant confirmé} (transition \texttt{HIGH}$\rightarrow$\texttt{LOW} stable pendant \SI{50}{\milli\second}).
+
+\subsubsection{Machine à états FP3}
+
+La logique d'enregistrement est modélisée par une machine à trois états, implémentée dans la \verb|loop()| principale :
+
 \begin{itemize}
-    \item Déclenchement par appui bouton $\rightarrow$ capture d'\SI{1}{\second} = 8000 échantillons à \SI{8}{\kilo\hertz}
-    \item Format des échantillons : int16 little-endian (2 octets / échantillon)
-    \item Baudrate série : \num{250000} bauds
-    \item Header de synchronisation : \TODO{ex. \texttt{0xAA55} ou caractère délimiteur}
-\end{itemize}}
+    \item \texttt{IDLE} : attente du bouton. La loop continue à exécuter FP1+FP2 normalement.
+    \item \texttt{ARMING} : \texttt{buf8kTail} est aligné sur \texttt{buf8kHead} (flush des échantillons stale), puis les 8000 échantillons suivants produits par FP2 sont copiés dans \texttt{captureBuffer[8000]} au fur et à mesure.
+    \item \texttt{DUMPING} : le \texttt{captureBuffer} est envoyé octet par octet sur le port série selon un protocole binaire (voir ci-dessous). La boucle reste non-bloquante grâce à \verb|Serial.availableForWrite()|.
+\end{itemize}
+
+Le \texttt{captureBuffer} est un tableau \texttt{int16\_t} de 8000 éléments (\SI{16}{\kibi\byte} en SRAM), indépendant du buffer circulaire \texttt{buf8k}. Il agit comme un \emph{snapshot gelé} qu'on peut dumper sereinement sans race condition avec le producteur FP1/FP2 qui continue à produire pendant le transfert.
+
+\subsubsection{Protocole série binaire}
+
+Le fichier \texttt{.wav} final doit contenir des entiers signés 16 bits little-endian. Plutôt que d'encoder en ASCII (coûteux en bande passante, surcoût $\times 5$), on dumpe directement les int16 en binaire, encadrés par des \emph{magic bytes} qui permettent au parser PC de retrouver le bloc même au milieu des messages texte \texttt{[FP1]}/\texttt{[FP2]} émis en continu :
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\linewidth}{@{}l l X@{}}
+\toprule
+\textbf{Champ} & \textbf{Taille} & \textbf{Contenu} \\
+\midrule
+Magic header    & 4 octets  & \texttt{0xAA 0x55 0xAA 0x55} \\
+Nombre samples  & 4 octets  & \texttt{uint32} little-endian ($= 8000$) \\
+PCM payload     & 16000 oct & 8000 $\times$ \texttt{int16} little-endian \\
+Magic footer    & 4 octets  & \texttt{0xDE 0xAD 0xBE 0xEF} \\
+\midrule
+\textbf{Total}  & \textbf{16008 octets} & \\
+\bottomrule
+\end{tabularx}
+\caption{Format du bloc binaire FP3 sur le port série.}
+\label{tab:fp3-protocol}
+\end{table}
+
+Durée de transfert : $16008 \times 10 / 250\,000 \approx \SI{0.64}{\second}$ à \num{250000}~bauds (8N1). Le flux atteint \SI{24.4}{\kibi\byte\per\second}, contre \SI{16}{\kibi\byte\per\second} produits par FP2 côté buf8k (à \SI{8}{\kilo\hertz} $\times$ 2~octets) : le lien série est plus rapide que le producteur, pas de goulot d'étranglement.
+
+\subsection{Implémentation}
+
+\subsubsection{Coût mémoire FP3}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{0.75\linewidth}{@{}l r X@{}}
+\toprule
+\textbf{Ajout} & \textbf{Taille} & \textbf{Commentaire} \\
+\midrule
+\texttt{captureBuffer[8000]} \texttt{int16} & \SI{16}{\kibi\byte} & snapshot 1 s d'audio \\
+État machine, index dump, flags bouton & $\sim$32 octets & 7 variables statiques \\
+\midrule
+Total SRAM avant FP3 (env \texttt{due}) & \num{8064} octets & 8.2\,\% \\
+Total SRAM après FP3 (env \texttt{due})  & \textbf{\num{24084} octets} & \textbf{24.5\,\%} \\
+Marge restante & $\sim$\SI{74}{\kibi\byte} & amplement suffisant pour MFCC (FP4) \\
+\bottomrule
+\end{tabularx}
+\caption{Bilan mémoire de l'ajout FP3.}
+\label{tab:fp3-memory}
+\end{table}
 
 \subsubsection{Script Python côté PC}
 
-\TODO{Commit du script \texttt{scripts/serial\_to\_wav.py} qui :
+Le fichier \verb|scripts/fp3_recv.py| implémente le récepteur : ouverture du port série (auto-détection \texttt{usbmodem}/\texttt{ACM}/\texttt{COM}), lecture octet par octet jusqu'à détection du magic header, extraction du nombre de samples et du payload, vérification du footer, écriture du \verb|.wav| via le module standard Python \verb|wave|. Dépendance unique : \verb|pyserial| (\verb|pip install pyserial|).
+
+Extrait du cœur du script :
+
+\begin{lstlisting}[style=py, caption={Noyau du parser série \texttt{fp3\_recv.py}.}]
+while time.time() < deadline:
+    buf += ser.read(1)
+    if buf[-4:] == HEADER:              # 0xAA 0x55 0xAA 0x55
+        break
+
+nb_samples = struct.unpack("<I", ser.read(4))[0]
+payload    = ser.read(nb_samples * 2)    # 16000 octets int16 LE
+
+with wave.open(out_path, "wb") as wf:
+    wf.setnchannels(1)
+    wf.setsampwidth(2)
+    wf.setframerate(8000)
+    wf.writeframes(payload)
+\end{lstlisting}
+
+\subsection{Validation (ET4)}
+
+\subsubsection{Protocole expérimental}
+
 \begin{enumerate}
-    \item Ouvre le port série
-    \item Attend le header
-    \item Lit 8000 int16
-    \item Écrit un fichier \texttt{.wav} (16 bits, mono, \SI{8}{\kilo\hertz}) via \texttt{scipy.io.wavfile} ou \texttt{wave}
+    \item Câblage MAX9814 (VCC~=~3V3, GND, OUT~=~A0) et bouton (entre D2 et GND)
+    \item Upload firmware \texttt{due}
+    \item Lancement du récepteur PC : \verb|python3 scripts/fp3_recv.py|
+    \item Appui D2, prononciation de « Électronique » à $\sim$\SI{15}{\centi\metre} du microphone
+    \item Génération automatique de \verb|recording_YYYYMMDD_HHMMSS.wav|
+    \item Ouverture dans Audacity, lecture, observation de la forme d'onde et du spectrogramme
 \end{enumerate}
-Inclure l'extrait clé du script dans le rapport.}
 
-\subsection{Validation}
+\subsubsection{Résultats}
 
-\subsubsection{Enregistrement du mot « Électronique »}
+\TODO{Capture Audacity de la forme d'onde (\texttt{File~→~Open~→~recording.wav}, puis \texttt{Ctrl+F} pour ajuster le zoom). Attendue : 4 zones d'énergie distinctes correspondant aux syllabes « É-lec-tro-nique », amplitude \SI{\sim10}{\percent}-\SI{20}{\percent} de la pleine échelle, pas de clipping. Fichier \texttt{assets/FP3/fp3\_audacity\_waveform.png}.}
 
-\TODO{Figure \texttt{fp3-audacity-electronique.png} : capture Audacity montrant :
-\begin{itemize}
-    \item La forme d'onde temporelle du mot (visualisation des 4 syllabes)
-    \item Le spectrogramme associé (bande 0--\SI{4}{\kilo\hertz})
-    \item La fréquence d'échantillonnage indiquée (\SI{8}{\kilo\hertz})
-\end{itemize}}
+\TODO{Capture Audacity du spectrogramme (piste~→~menu~→~\texttt{Spectrogram}). Attendue : bandes horizontales bien contrastées dans la plage 0-\SI{4}{\kilo\hertz} (formants vocaux F1, F2, F3), énergie quasi-nulle au-dessus de \SI{4}{\kilo\hertz} grâce au filtre FP2. Fichier \texttt{assets/FP3/fp3\_audacity\_spectrogram.png}.}
 
-\subsubsection{Validation auditive}
+\TODO{Capture Audacity du spectre (\texttt{Analyze~→~Plot Spectrum}, Hann, 2048 points). Attendue : énergie concentrée entre \SI{200}{\hertz} et \SI{3}{\kilo\hertz}, décroissance marquée après \SI{4}{\kilo\hertz}. Fichier \texttt{assets/FP3/fp3\_audacity\_spectrum.png}.}
 
-\TODO{Décrire l'écoute : intelligibilité, absence de cliquetis, absence d'artefacts de sous-échantillonnage. Stocker le fichier \texttt{.wav} dans \texttt{docs/audio-samples/electronique.wav}.}
+\TODO{Fichier audio : \texttt{assets/FP3/electronique.wav} à joindre dans le dépôt pour archive.}
 
-\subsubsection{Comparaison spectrale avant/après filtre}
+\subsubsection{Test auditif}
 
-\TODO{Optionnel mais valorisant : comparer le spectre du signal brut (si on enregistre directement la sortie ADC à \SI{32}{\kilo\hertz}) vs le signal filtré \& sous-échantillonné à \SI{8}{\kilo\hertz}. Montre visuellement l'effet du filtre.}
+La validation \etref{4} est en dernier recours auditive : un auditeur humain doit \textbf{reconnaître sans ambiguïté} le mot « Électronique » à la lecture du \verb|.wav| dans Audacity. Le bruit de fond est minimisé par le filtre passe-bas qui élimine les fréquences hors de la bande utile ($>\SI{4}{\kilo\hertz}$) et par le sous-échantillonnage qui supprime toute énergie résiduelle au-delà de Nyquist.
 
 \subsection{Bilan FP3}
 
-\TODO{Synthèse : la chaîne FP1 + FP2 est validée. Le mot est audible et intelligible dans Audacity.}
+La chaîne d'enregistrement est opérationnelle :
+\begin{itemize}
+    \item \textbf{Bouton D2} déclenche une capture d'1~\si{\second} sans perte d'échantillons (\texttt{captureBuffer} séparé, producteur et dumpeur indépendants)
+    \item \textbf{Protocole série binaire} robuste avec magic bytes : cohabite avec les messages texte \texttt{[FP1]}/\texttt{[FP2]} sans les interrompre
+    \item \textbf{Script Python} autonome, dépendance unique \verb|pyserial|, auto-détection du port
+    \item \textbf{SRAM consommée} : 24.5\,\% après FP3 --- marge de \SI{74}{\kibi\byte} pour FP4 (MFCC)
+    \item \textbf{\etref{4}} validée lorsque le \texttt{.wav} produit permet de reconnaître distinctement le mot prononcé à l'écoute Audacity
+\end{itemize}
+
+Le signal numérique enregistré \emph{est} également celui qui alimentera le pipeline MFCC (FP4) : \texttt{buf8k} reste le point unique d'entrée pour les fonctions aval. FP3 est donc à la fois une validation (humaine) et une pré-validation du signal pour la reconnaissance automatique.
 
 \newpage
