@@ -10,3 +10,11 @@
 
 # macOS
 .DS_Store
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# WAV files générés par les tests (on versionne seulement ceux de assets/FP3/)
+/recording_*.wav
