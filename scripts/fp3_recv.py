@@ -49,7 +49,7 @@ HEADER        = b"\xAA\x55\xAA\x55"
 FOOTER        = b"\xDE\xAD\xBE\xEF"
 BAUDRATE      = 250_000
 SAMPLE_RATE   = 8_000
-EXPECTED_SAMPLES = 8_000     # 1 s @ 8 kHz
+EXPECTED_SAMPLES = 24_000    # 3 s @ 8 kHz
 
 
 def detect_port() -> str | None:

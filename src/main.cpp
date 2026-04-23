@@ -816,8 +816,31 @@ void loop(void)
 #endif
 
     // --- Mesure de fréquence réelle + log FP1/FP2 (~1 fois/seconde) ---
+    //
+    // IMPORTANT : on SUSPEND les logs pendant DUMPING, sinon les caractères
+    // ASCII s'intercalent dans le flux binaire FP3 et corrompent le fichier
+    // .wav reconstitué côté PC (le parser Python lit N octets consécutifs
+    // en pensant recevoir du PCM, mais certains sont en réalité les lettres
+    // de "[FP1] Fe_reelle=..." → alignement perdu, footer magic décalé).
+    //
+    // On met aussi à jour lastFreqMeasureUs pendant la suspension pour
+    // éviter un log "rattrapage" monstre juste après la fin du dump.
 
     uint32_t nowUs = micros();
+#if !defined(FP1_PURE) || (FP1_PURE == 0)
+    if (fp3State == FP3_DUMPING)
+    {
+        // Pendant le dump binaire : on décale lastFreqMeasureUs pour que
+        // le log ne "rattrape" pas d'un coup quand on revient en IDLE.
+        lastFreqMeasureUs = nowUs;
+        // Remise à zéro du compteur pour que le prochain log affiche une
+        // mesure sur une seule seconde (pas cumulée depuis le dump).
+        NVIC_DisableIRQ(TC0_IRQn);
+        sampleCount = 0;
+        NVIC_EnableIRQ(TC0_IRQn);
+    }
+    else
+#endif
     if ((nowUs - lastFreqMeasureUs) >= 1000000UL)
     {
         // Lire + reset sampleCount de façon atomique
