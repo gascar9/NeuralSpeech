@@ -138,7 +138,17 @@ def main() -> int:
         print("        Ferme le monitor PlatformIO si il est encore ouvert.")
         return 1
 
-    print(f"En attente du header magic (appuyez sur D2 de l'Arduino Due) ...")
+    # Évite le faux déclenchement : le kernel macOS/Linux peut garder en cache
+    # des octets d'une session précédente (jusqu'à 16-48 Kio). Sans flush, le
+    # parser les prendrait pour une nouvelle capture.
+    # On laisse aussi l'Arduino Due redémarrer après le pulse DTR de l'ouverture
+    # (typique ~1 s pour que le bootloader finisse et que setup() tourne).
+    print("Flush buffer série + attente reset Arduino (~1.5 s) ...")
+    time.sleep(1.5)
+    ser.reset_input_buffer()
+    ser.reset_output_buffer()
+
+    print(f"\nEn attente du header magic (appuyez sur D2 de l'Arduino Due) ...")
     print(f"Délai max : {args.timeout:.0f} s")
 
     # ---- attente du header ----

@@ -1,6 +1,6 @@
 # Guide de test bench — FP3 (Validation Audacity)
 
-**Objectif** : valider **ET4** — un enregistrement d'1 seconde du mot « Électronique » doit être restitué de manière claire dans Audacity.
+**Objectif** : valider **ET4** — un enregistrement de 3 secondes du mot « Électronique » doit être restitué de manière claire dans Audacity.
 
 **Temps estimé** : 30 min pour le premier enregistrement propre, 15 min par enregistrement suivant.
 
@@ -64,7 +64,7 @@ Le monitor série à 250000 baud doit afficher au démarrage :
 FE             : 32000 Hz
 ...
 FP3 button pin : D2
-FP3 capture    : 8000 samples @ 8 kHz (1 s)
+FP3 capture    : 24000 samples @ 8 kHz (3 s)
 FP3 pret — appuyez D2 pour enregistrer.
 ...
 [FP1] Fe_reelle=32012 Hz | samples=32012 | buf_used=0/512
@@ -75,9 +75,9 @@ FP3 pret — appuyez D2 pour enregistrer.
 
 Test du bouton : appuie une fois sur D2. Tu dois voir :
 ```
-[FP3] Capture armee -- parlez maintenant (1 s)
-[FP2] ... | fp3=ARMING (3200/8000)
-[FP2] ... | fp3=ARMING (6400/8000)
+[FP3] Capture armee -- parlez maintenant (3 s)
+[FP2] ... | fp3=ARMING (8000/24000)
+[FP2] ... | fp3=ARMING (16000/24000)
 [FP3] --- DEBUT CAPTURE WAV ---
 <caractères bizarres = les 16008 octets binaires>
 [FP3] --- FIN CAPTURE WAV ---
@@ -115,16 +115,16 @@ Délai max : 120 s
 ### Enregistrer le mot
 1. Approche le micro à 10-20 cm de ta bouche
 2. **Appuie sur D2** (un court appui suffit)
-3. **Prononce "Électronique"** clairement (tu as 1 seconde à partir de l'appui)
-4. Le script détecte le header, lit les 16 Kio de PCM, écrit le WAV
+3. **Prononce "Électronique"** clairement (tu as **3 secondes** à partir de l'appui)
+4. Le script détecte le header, lit les 48 Kio de PCM, écrit le WAV
 
 Sortie finale :
 ```
-Header OK. Annonce : 8000 samples.
-Payload PCM reçu : 16000 octets en 640 ms (24.4 Kio/s)
+Header OK. Annonce : 24000 samples.
+Payload PCM reçu : 48000 octets en ~1.9 s (~24 Kio/s)
 
-✓ WAV écrit : /Users/.../recording_20260422_193015.wav  (15.7 Kio)
-  Mono, 16 bits, 8000 Hz, 1.00 s
+✓ WAV écrit : /Users/.../recording_20260422_193015.wav  (47 Kio)
+  Mono, 16 bits, 8000 Hz, 3.00 s
 
 Ouvre-le dans Audacity :  File → Open → recording_20260422_193015.wav
 ```
@@ -152,13 +152,13 @@ python3 scripts/fp3_recv.py --timeout 300
 
 1. Lancer **Audacity**
 2. **File → Open** → sélectionner le `.wav` produit
-3. Tu vois apparaître **une seule piste** (mono), 1 seconde de durée, ~2048 px de long selon le zoom
+3. Tu vois apparaître **une seule piste** (mono), **3 secondes** de durée
 
 ### Ce que tu dois voir/entendre
 
 **Onde temporelle** :
 - La forme d'onde doit avoir des "zones d'énergie" visibles correspondant aux syllabes du mot
-- « É-lec-tro-nique » → 4 syllabes distinctes sur 1 seconde
+- « É-lec-tro-nique » → 4 syllabes distinctes (tu as 3 s, donc tu peux parler sans te presser ou même dire le mot 2-3 fois)
 - Amplitude typique : ±10 à ±20 % de la pleine échelle (±2048 sur int16 → visible dans Audacity)
 - Pas de **clipping** (pas de carré plat en haut ou en bas de l'onde)
 
@@ -170,7 +170,7 @@ python3 scripts/fp3_recv.py --timeout 300
 ### Captures à prendre pour le rapport
 
 1. **Vue complète de l'onde temporelle**
-   - Zoom : `Ctrl+F` (Fit in Window) pour voir toute la seconde
+   - Zoom : `Ctrl+F` (Fit in Window) pour voir les 3 secondes
    - Capture écran de la fenêtre Audacity entière
    - Nommer : `assets/FP3/fp3_audacity_waveform.png`
    - **Doit montrer** : les 4 syllabes distinctes, l'amplitude cohérente, pas de clipping
@@ -262,7 +262,7 @@ xxd capture.bin | grep -n "aa 55 aa 55"
 - ❌ **Pas de masse commune** : le micro captera du bruit 50 Hz — vérifie que GND micro = GND Due
 - ❌ **Monitor PlatformIO ouvert en même temps que Python** : conflit d'ouverture de port, un seul à la fois
 - ❌ **Bouton tenu appuyé trop longtemps** : anti-rebond 50 ms mais la state machine ne re-déclenche qu'après un relâche. Appui court suffisant.
-- ❌ **Mot dit trop tôt** : l'enregistrement commence à l'appui du bouton, pas avant. Appuie **puis** parle dans les 1.2 s qui suivent.
+- ❌ **Mot dit trop tôt** : l'enregistrement commence à l'appui du bouton, pas avant. Appuie **puis** parle dans les ~3.2 s qui suivent.
 - ❌ **Distance micro trop grande** : reste à 10-20 cm pour un bon signal / bruit
 
 ## Si le WAV est silencieux (amplitude quasi-nulle)

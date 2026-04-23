@@ -16,11 +16,11 @@
  *   - Sous-échantillonnage x4 : 1 échantillon filtré sur SUBSAMPLE_FACTOR
  *     poussé dans le buffer audio 8 kHz (pour FP3/FP4).
  *
- * FP3 (ET4) : Enregistrement 1 seconde à 8 kHz, dump binaire sur série.
+ * FP3 (ET4) : Enregistrement 3 secondes à 8 kHz, dump binaire sur série.
  *   - Bouton sur D2 (INPUT_PULLUP, front descendant, anti-rebond 50 ms).
- *   - State machine : IDLE → ARMING (capture 8000 samples) → DUMPING → IDLE.
+ *   - State machine : IDLE → ARMING (capture 24000 samples = 3 s) → DUMPING → IDLE.
  *   - Protocole série : magic header 0xAA55AA55 | uint32 nb_samples |
- *     8000×int16 little-endian | magic footer 0xDEADBEEF.
+ *     24000×int16 little-endian | magic footer 0xDEADBEEF.
  *   - Script Python côté PC reconstruit un .wav importable Audacity.
  *
  * Choix ISR vs loop pour le filtrage :
@@ -115,8 +115,8 @@ constexpr uint8_t  FP3_BUTTON_PIN        = 2;
 /** Durée anti-rebond bouton en millisecondes */
 constexpr uint32_t FP3_DEBOUNCE_MS       = 50;
 
-/** Nombre d'échantillons à capturer : 1 s × 8000 Hz */
-constexpr uint32_t FP3_CAPTURE_SAMPLES   = 8000;
+/** Nombre d'échantillons à capturer : 3 s × 8000 Hz = 24000 samples = 48 Kio */
+constexpr uint32_t FP3_CAPTURE_SAMPLES   = 24000;
 
 /**
  * Magic header/footer du protocole série binaire FP3.
@@ -201,7 +201,7 @@ enum Fp3State : uint8_t {
 static volatile Fp3State fp3State = FP3_IDLE;
 
 /**
- * Buffer de capture FP3 : snapshot linéaire de 1 seconde à 8 kHz.
+ * Buffer de capture FP3 : snapshot linéaire de 3 secondes à 8 kHz.
  * Taille : 8000 × 2 octets = 16 000 octets = ~15.6 Kio.
  * Déclaré static (durée de vie = durée du programme).
  * Non-volatile : rempli uniquement depuis la loop() (pas d'ISR).
@@ -469,7 +469,7 @@ void fp3_check_button(void)
         if (currentState == LOW)
         {
             // Front descendant confirmé → armement de la capture
-            Serial.println("\n[FP3] Capture armee -- parlez maintenant (1 s)");
+            Serial.println("\n[FP3] Capture armee -- parlez maintenant (3 s)");
 
             // Aligner le consommateur buf8k sur le producteur pour éviter
             // de capturer des échantillons "stale" antérieurs à l'appui.
@@ -503,7 +503,7 @@ void fp3_push_sample(int16_t sample)
 
     if (captureIdx >= FP3_CAPTURE_SAMPLES)
     {
-        // 1 seconde capturée → prépare le dump série
+        // 3 secondes capturées → prépare le dump série
         dumpIdx      = 0;
         dumpPhase    = 0;
         dumpPhaseIdx = 0;
@@ -663,7 +663,7 @@ void setup(void)
     buttonLastChangeMs = millis();
     Serial.print("FP3 button pin : D"); Serial.println(FP3_BUTTON_PIN);
     Serial.print("FP3 capture    : "); Serial.print(FP3_CAPTURE_SAMPLES);
-    Serial.println(" samples @ 8 kHz (1 s)");
+    Serial.println(" samples @ 8 kHz (3 s)");
     Serial.println("FP3 pret — appuyez D2 pour enregistrer.");
 #endif
 
