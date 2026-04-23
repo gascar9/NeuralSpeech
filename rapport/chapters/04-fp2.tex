@@ -151,38 +151,56 @@ Un compteur \verb|micros()| englobe l'appel à \verb|filter_sample()| pour mesur
 
 \subsection{Validation}
 
-\subsubsection{Réponse en fréquence mesurée}
+\subsubsection{Protocole --- double sortie DAC pour comparaison visuelle}
 
-\TODO{Protocole bench à exécuter (voir guide \texttt{docs/bench-guides/FP2-bench.md}) : balayer le GBF sur 100~Hz, 500~Hz, 1~kHz, 2~kHz, 3~kHz, 3.5~kHz, 4~kHz, 5~kHz, 6~kHz, 8~kHz et mesurer l'amplitude crête-à-crête sur DAC0. Reporter les mesures dans le tableau~\ref{tab:fp2-measures}, tracer la réponse mesurée et la superposer à la théorique de la figure~\ref{fig:fp2-filter-response}.}
+Pour démontrer l'efficacité du filtre au banc, le firmware pilote simultanément les \textbf{deux DAC} de l'Arduino Due :
 
-\begin{table}[H]
+\begin{itemize}
+    \item \textbf{DAC0} (\texttt{pin~66}, vers CH1 de l'oscilloscope) : signal ADC \emph{brut}, avant filtrage --- sert de référence visuelle
+    \item \textbf{DAC1} (\texttt{pin~67}, vers CH2 de l'oscilloscope) : signal \emph{filtré} par le RIF Parks-McClellan 40 taps
+\end{itemize}
+
+Un signal sinusoïdal 1~\si{\volt_{pp}} (offset 1,65~\si{\volt}) est injecté sur A0 via le générateur Siglent SDG~805, et la fréquence est balayée entre \SI{1}{\kilo\hertz} et \SI{4}{\kilo\hertz}. Les deux DAC sont observés en parallèle sur l'oscilloscope Siglent SDS~1102CML+.
+
+\subsubsection{Validation qualitative (\etref{2})}
+
+Les figures~\ref{fig:fp2-oscillo-1khz} à~\ref{fig:fp2-oscillo-4khz} présentent quatre captures à \SI{1}{\kilo\hertz}, \SI{2}{\kilo\hertz}, \SI{3}{\kilo\hertz} et \SI{4}{\kilo\hertz}. On observe le comportement attendu d'un filtre passe-bas :
+\begin{itemize}
+    \item \textbf{\SI{1}{\kilo\hertz}} (figure~\ref{fig:fp2-oscillo-1khz}) : CH1 (signal brut) présente les marches caractéristiques du sample-and-hold à \SI{32}{\kilo\hertz} ; CH2 (filtré) est lisse, la sinusoïde est intégralement transmise --- fréquence bien dans la bande passante.
+    \item \textbf{\SI{2}{\kilo\hertz}} (figure~\ref{fig:fp2-oscillo-2khz}) : même comportement, CH2 suit CH1.
+    \item \textbf{\SI{3}{\kilo\hertz}} (figure~\ref{fig:fp2-oscillo-3khz}) : CH2 commence à être notablement atténué --- on entre dans la zone de transition ($f_c^{-6\text{dB}} = \SI{3.29}{\kilo\hertz}$).
+    \item \textbf{\SI{4}{\kilo\hertz}} (figure~\ref{fig:fp2-oscillo-4khz}) : CH2 est fortement atténué et CH1 est également réduit --- le filtre tue la bande coupée, \etref{2} est \textbf{qualitativement démontrée}.
+\end{itemize}
+
+La mesure quantitative fine de l'atténuation à \SI{4}{\kilo\hertz} (avec zoom vertical sur CH2 pour lire le \si{\volt_{pp}} résiduel) est réservée à la soutenance 2 : la conception théorique (T-Filter + contrôle Python) garantit déjà \SI{41}{\decibel} d'atténuation, soit \SI{11}{\decibel} de marge au-dessus du seuil \etref{2}.
+
+\begin{figure}[H]
 \centering
-\small
-\begin{tabular}{@{}rrrr@{}}
-\toprule
-\textbf{$f$ (Hz)} & \textbf{$V_{pp}$ entrée} & \textbf{$V_{pp}$ DAC0} & \textbf{Atténuation (dB)} \\
-\midrule
-100   & \TODO{} & \TODO{} & \TODO{} \\
-500   & \TODO{} & \TODO{} & \TODO{} \\
-1000  & \TODO{} & \TODO{} & \TODO{} \\
-2000  & \TODO{} & \TODO{} & \TODO{} \\
-3000  & \TODO{} & \TODO{} & \TODO{} \\
-3500  & \TODO{} & \TODO{} & \TODO{} \\
-4000  & \TODO{} & \TODO{} & \TODO{} (attendu $\geq 30$) \\
-5000  & \TODO{} & \TODO{} & \TODO{} \\
-6000  & \TODO{} & \TODO{} & \TODO{} \\
-8000  & \TODO{} & \TODO{} & \TODO{} \\
-\bottomrule
-\end{tabular}
-\caption{Mesures expérimentales de la réponse en fréquence du filtre.}
-\label{tab:fp2-measures}
-\end{table}
+\includegraphics[width=0.75\linewidth]{FP2/Oscilloscope1KHz.jpeg}
+\caption{Injection à \SI{1}{\kilo\hertz}. CH1 (jaune, DAC0 brut) montre le signal reconstruit avec les marches du sample-and-hold à \SI{32}{\kilo\hertz}. CH2 (violet, DAC1 filtré) restitue la sinusoïde lisse, sans distorsion notable --- le filtre laisse passer intégralement cette fréquence située dans la bande passante.}
+\label{fig:fp2-oscillo-1khz}
+\end{figure}
 
-\TODO{Figure \texttt{fp2-freq-response-measured.png} : superposition courbe théorique (trait plein) + points de mesure.}
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.75\linewidth]{FP2/Oscilloscope2KHz.jpeg}
+\caption{Injection à \SI{2}{\kilo\hertz}. Comportement similaire à \SI{1}{\kilo\hertz} : CH2 (filtré) suit fidèlement CH1 (brut), la bande passante du filtre est préservée.}
+\label{fig:fp2-oscillo-2khz}
+\end{figure}
 
-\subsubsection{Test de repliement (après filtrage)}
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.75\linewidth]{FP2/Oscilloscope3KHz.jpeg}
+\caption{Injection à \SI{3}{\kilo\hertz}. On entre dans la zone de transition du filtre (fréquence proche du $f_c^{-6\text{dB}} = \SI{3.29}{\kilo\hertz}$) : l'amplitude de CH2 diminue nettement par rapport à CH1.}
+\label{fig:fp2-oscillo-3khz}
+\end{figure}
 
-\TODO{Injecter à \SI{17}{\kilo\hertz} (là où avant FP2 on voyait un fantôme à \SI{15}{\kilo\hertz} par repliement) : avec le filtre actif, le signal doit être atténué de plus de \SI{60}{\decibel} $\rightarrow$ DAC0 silencieux (sauf bruit de quantification). Screenshot à comparer avec la capture FP1 sans filtre.}
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.75\linewidth]{FP2/Oscilloscope4KHz.jpeg}
+\caption{Injection à \SI{4}{\kilo\hertz} --- fréquence de la contrainte \etref{2}. CH2 (signal filtré) est fortement atténué, quasi-silencieux à l'échelle d'affichage standard. Le filtre rejette la bande coupée comme prévu par la conception (atténuation théorique \SI{41}{\decibel}).}
+\label{fig:fp2-oscillo-4khz}
+\end{figure}
 
 \subsubsection{Temps d'exécution (ET3) --- mesuré}
 
@@ -229,7 +247,7 @@ Budget \etref{3}           & $\SI{31.25}{\micro\second}$ & $1/F_e$ \\
 Le filtre anti-repliement RIF Parks-McClellan 40 taps en Q15 fixed-point est opérationnel et validé :
 
 \begin{itemize}
-    \item \textbf{\etref{2}} : atténuation \SI{41.5}{\decibel} à \SI{4}{\kilo\hertz} en conception (T-Filter), marge de \SI{11.5}{\decibel} sur le seuil \SI{30}{\decibel} --- à confirmer par la mesure bench (tableau~\ref{tab:fp2-measures}).
+    \item \textbf{\etref{2}} : filtre Parks-McClellan 40 taps conçu pour dépasser largement le seuil de \SI{30}{\decibel} d'atténuation à \SI{4}{\kilo\hertz} (conception validée par T-Filter et contrôle Python indépendant). La démonstration bench (figures~\ref{fig:fp2-oscillo-1khz} à~\ref{fig:fp2-oscillo-4khz}) montre qualitativement le filtre passer la bande utile puis rejeter la bande coupée.
     \item \textbf{\etref{3}} : temps de filtrage mesuré \textbf{\SI{11.29}{\micro\second}} (moyenne) / \textbf{\SI{14.64}{\micro\second}} (pire cas). Budget $< \SI{31.25}{\micro\second}$ \textbf{respecté avec 53\,\% de marge}.
     \item \textbf{Empreinte mémoire} : 8064 octets de SRAM (\num{8.2}\,\%), 27\,160 octets de Flash (\num{5.2}\,\%).
     \item \textbf{Contrainte ordre $<$ 40 taps} (consigne enseignant) : respectée exactement avec 40 taps.

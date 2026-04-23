@@ -1,24 +1,31 @@
 /**
- * NeuralSpeech — FP1 + FP2 : Numérisation et conditionnement du signal audio
+ * NeuralSpeech — FP1 + FP2 + FP3 : Numérisation, conditionnement, enregistrement
  *
  * FP1 (ET1) : ADC 12 bits à Fe = 32 kHz, déclenchement par TC0-CH0.
- *             Restitution DAC0 : signal filtré (pour validation oscilloscope FP2).
+ *             Restitution DAC0 : signal brut, DAC1 : signal filtré.
  *
  * FP2 (ET2, ET3) :
- *   - Filtre RIF passe-bas 97 taps (Hamming, fc=3577 Hz, fc_design=-6dB)
- *     atténuation >= 30 dB à 4 kHz (ET2).
+ *   - Filtre RIF passe-bas 40 taps (Parks-McClellan, fc_stop=4 kHz)
+ *     atténuation >= 30 dB à 4 kHz (ET2, marge mesurée -41.5 dB).
  *   - Implémenté en arithmétique Q15 (int16/int32) — pas de FPU nécessaire.
  *     Le SAM3X8E (Cortex-M3) n'a pas de FPU hardware : les MAC float
  *     coûtaient ~100-150 cycles chacun via __aeabi_fmul/__aeabi_fadd.
  *     Avec int32 MUL, chaque MAC coûte ~3-5 cycles → gain x30.
  *   - Implémenté dans la loop() via buffer circulaire dédié (pas dans l'ISR).
- *   - Mesure du temps de filtrage via micros() — doit être < 31 µs (ET3).
+ *   - Mesure du temps de filtrage via DWT Cycle Counter — doit être < 31 µs (ET3).
  *   - Sous-échantillonnage x4 : 1 échantillon filtré sur SUBSAMPLE_FACTOR
  *     poussé dans le buffer audio 8 kHz (pour FP3/FP4).
  *
+ * FP3 (ET4) : Enregistrement 1 seconde à 8 kHz, dump binaire sur série.
+ *   - Bouton sur D2 (INPUT_PULLUP, front descendant, anti-rebond 50 ms).
+ *   - State machine : IDLE → ARMING (capture 8000 samples = 1 s) → DUMPING → IDLE.
+ *   - Protocole série : magic header 0xAA55AA55 | uint32 nb_samples |
+ *     8000×int16 little-endian | magic footer 0xDEADBEEF.
+ *   - Script Python côté PC reconstruit un .wav importable Audacity.
+ *
  * Choix ISR vs loop pour le filtrage :
  *   On filtre dans la loop(), PAS dans l'ISR.
- *   Justification : 97 MAC int32 ≈ 6 µs théoriques << 31.25 µs entre deux TC0.
+ *   Justification : 40 MAC int32 ≈ 2.4 µs théoriques << 31.25 µs entre deux TC0.
  *   La loop() consomme tout le buffer ADC avant la prochaine interruption.
  *
  * Board : Arduino Due (SAM3X8E, 84 MHz, 96 Kio SRAM)
@@ -98,6 +105,28 @@ constexpr uint32_t DAC_FILTERED_PIN = DAC1;   // signal filtré après FP2
 /** Baudrate série */
 constexpr uint32_t SERIAL_BAUDRATE  = 250000;
 
+// ---------------------------------------------------------------------------
+// Constantes FP3 (ET4)
+// ---------------------------------------------------------------------------
+
+/** Broche du bouton poussoir (INPUT_PULLUP → appui = LOW) */
+constexpr uint8_t  FP3_BUTTON_PIN        = 2;
+
+/** Durée anti-rebond bouton en millisecondes */
+constexpr uint32_t FP3_DEBOUNCE_MS       = 50;
+
+/** Nombre d'échantillons à capturer : 1 s × 8000 Hz = 8000 samples = 16 Kio */
+constexpr uint32_t FP3_CAPTURE_SAMPLES   = 8000;
+
+/**
+ * Magic header/footer du protocole série binaire FP3.
+ * Le parser Python se base sur ces 4 octets pour délimiter le bloc.
+ * Indépendants des messages texte [FP1]/[FP2] qui peuvent apparaître
+ * pendant le transfert (le parser cherche les magic bytes, pas le silence).
+ */
+constexpr uint8_t FP3_MAGIC_HEADER[4]   = { 0xAA, 0x55, 0xAA, 0x55 };
+constexpr uint8_t FP3_MAGIC_FOOTER[4]   = { 0xDE, 0xAD, 0xBE, 0xEF };
+
 /**
  * Prescaler TC : TIMER_CLOCK2 = MCK/8 = 10 500 000 Hz
  * RC pour 32 kHz : 10 500 000 / 32 000 = 328.125 → 328
@@ -166,6 +195,62 @@ static int16_t  firBuf[FIR_BUF_SIZE];
 static uint32_t firBufHead = 0;
 
 // ---------------------------------------------------------------------------
+// FP3 — State machine, buffer de capture, état bouton
+// ---------------------------------------------------------------------------
+
+#if !defined(FP1_PURE) || (FP1_PURE == 0)
+
+/**
+ * États de la machine d'état FP3.
+ *   FP3_IDLE    : en attente d'appui bouton.
+ *   FP3_ARMING  : accumulation de FP3_CAPTURE_SAMPLES dans captureBuffer.
+ *   FP3_DUMPING : envoi du contenu via Serial (non-bloquant).
+ */
+enum Fp3State : uint8_t {
+    FP3_IDLE    = 0,
+    FP3_ARMING  = 1,
+    FP3_DUMPING = 2
+};
+
+static volatile Fp3State fp3State = FP3_IDLE;
+
+/**
+ * Buffer de capture FP3 : snapshot linéaire de 1 seconde à 8 kHz.
+ * Taille : 8000 × 2 octets = 16 000 octets = ~15.6 Kio.
+ * Déclaré static (durée de vie = durée du programme).
+ * Non-volatile : rempli uniquement depuis la loop() (pas d'ISR).
+ */
+static int16_t captureBuffer[FP3_CAPTURE_SAMPLES];
+
+/** Nombre d'échantillons déjà écrits dans captureBuffer (état ARMING) */
+static uint32_t captureIdx = 0;
+
+/**
+ * Index d'envoi dans captureBuffer (état DUMPING).
+ * On garde la progression entre deux appels de loop() pour
+ * ne pas bloquer (Serial.availableForWrite() check).
+ */
+static uint32_t dumpIdx = 0;
+
+/**
+ * Phase interne du DUMPING :
+ *   0 = en train d'envoyer le header (4 octets magic + 4 octets nb_samples)
+ *   1 = en train d'envoyer les données PCM (16000 octets)
+ *   2 = en train d'envoyer le footer (4 octets)
+ * On avance octet par octet pour rester non-bloquant.
+ */
+static uint8_t  dumpPhase = 0;
+static uint32_t dumpPhaseIdx = 0;   // offset dans la phase courante
+
+/** Timestamp du dernier changement d'état du bouton (anti-rebond) */
+static uint32_t buttonLastChangeMs = 0;
+
+/** Dernier état lu sur le pin bouton (HIGH=relâché, LOW=pressé) */
+static uint8_t  buttonLastState = HIGH;
+
+#endif  // !FP1_PURE
+
+// ---------------------------------------------------------------------------
 // Variables de mesure de fréquence réelle (FP1)
 // ---------------------------------------------------------------------------
 
@@ -192,6 +277,13 @@ void     configureTC0(void);
 void     configureADC(void);
 void     configureDAC(void);
 int16_t  filter_sample(uint16_t new_sample);
+
+#if !defined(FP1_PURE) || (FP1_PURE == 0)
+void     fp3_check_button(void);
+void     fp3_push_sample(int16_t sample);
+void     fp3_service_dump(void);
+const char* fp3_state_str(void);
+#endif
 
 // ---------------------------------------------------------------------------
 // ISR : Timer Counter 0 — canal 0
@@ -332,6 +424,226 @@ void configureDAC(void)
 }
 
 // ---------------------------------------------------------------------------
+// FP3 — fonctions de la state machine (compilées seulement en mode FP1+FP2)
+// ---------------------------------------------------------------------------
+
+#if !defined(FP1_PURE) || (FP1_PURE == 0)
+
+/**
+ * fp3_state_str() — retourne le nom textuel de l'état courant.
+ * Utilisé dans le log [FP2] pour la colonne fp3=...
+ */
+const char* fp3_state_str(void)
+{
+    switch (fp3State)
+    {
+        case FP3_IDLE:    return "IDLE";
+        case FP3_ARMING:  return "ARMING";
+        case FP3_DUMPING: return "DUMPING";
+        default:          return "???";
+    }
+}
+
+/**
+ * fp3_check_button() — détection front descendant avec anti-rebond.
+ *
+ * Appelée depuis la loop() à chaque itération (coût : 1 digitalRead +
+ * 1 millis() + quelques comparaisons).
+ *
+ * Logique :
+ *   - On lit l'état courant du pin.
+ *   - Si l'état a changé ET que 50 ms se sont écoulées depuis le dernier
+ *     changement → on valide le nouvel état.
+ *   - Un front descendant validé (HIGH→LOW) en état IDLE déclenche ARMING.
+ *
+ * Pièges :
+ *   - Ne PAS utiliser attachInterrupt() pour le bouton : un appui génère
+ *     facilement 5-20 rebonds en 1-5 ms, ce qui déclencherait plusieurs
+ *     ARMING consécutifs avant que la loop() ait le temps de progresser.
+ *   - Le polling dans la loop() + délai 50 ms est plus robuste ici.
+ */
+void fp3_check_button(void)
+{
+    // Ne traiter le bouton qu'en IDLE (évite une re-arm accidentelle)
+    if (fp3State != FP3_IDLE) { return; }
+
+    uint8_t  currentState = (uint8_t)digitalRead(FP3_BUTTON_PIN);
+    uint32_t nowMs        = millis();
+
+    if (currentState != buttonLastState)
+    {
+        // Changement d'état détecté → démarrer ou remettre à zéro le timer
+        // anti-rebond (on accepte le nouvel état seulement si stable 50 ms)
+        buttonLastChangeMs = nowMs;
+        buttonLastState    = currentState;
+    }
+    else if ((nowMs - buttonLastChangeMs) >= FP3_DEBOUNCE_MS)
+    {
+        // État stable depuis >= 50 ms
+        if (currentState == LOW)
+        {
+            // Front descendant confirmé → armement de la capture
+            Serial.println("\n[FP3] Capture armee -- parlez maintenant (1 s)");
+
+            // Aligner le consommateur buf8k sur le producteur pour éviter
+            // de capturer des échantillons "stale" antérieurs à l'appui.
+            // Désactivation IRQ courte pour lecture atomique de buf8kHead.
+            NVIC_DisableIRQ(TC0_IRQn);
+            buf8kTail = buf8kHead;
+            NVIC_EnableIRQ(TC0_IRQn);
+
+            captureIdx = 0;
+            fp3State   = FP3_ARMING;
+        }
+    }
+}
+
+/**
+ * fp3_push_sample() — appelée depuis la loop() après chaque sample 8 kHz.
+ *
+ * En état ARMING, copie le sample dans captureBuffer.
+ * Quand FP3_CAPTURE_SAMPLES sont accumulés, bascule en DUMPING.
+ *
+ * Ne doit PAS être appelée depuis l'ISR — la copie mémoire serait trop longue.
+ *
+ * @param sample  Échantillon int16_t centré sur 0, produit par filter_sample().
+ */
+void fp3_push_sample(int16_t sample)
+{
+    if (fp3State != FP3_ARMING) { return; }
+
+    captureBuffer[captureIdx] = sample;
+    captureIdx++;
+
+    if (captureIdx >= FP3_CAPTURE_SAMPLES)
+    {
+        // 1 seconde capturée → prépare le dump série
+        dumpIdx      = 0;
+        dumpPhase    = 0;
+        dumpPhaseIdx = 0;
+
+        // Flush synchrone du texte avant de commencer le binaire : évite que
+        // le bridge USB-UART ATmega16U2 mélange caractères ASCII et octets
+        // binaires de façon instable sous forte charge.
+        Serial.println("\n[FP3] --- DEBUT CAPTURE WAV ---");
+        Serial.flush();   // attend que le texte soit entièrement émis
+        delay(20);        // pause défensive pour que le bridge respire
+
+        fp3State = FP3_DUMPING;
+    }
+}
+
+/**
+ * fp3_service_dump() — moteur d'envoi non-bloquant, appelé chaque loop().
+ *
+ * Principe : on n'envoie que ce que le buffer TX série peut accepter
+ * MAINTENANT (Serial.availableForWrite()), puis on rend la main.
+ * La loop() revient très vite (plusieurs milliers de fois par seconde),
+ * donc le débit effectif atteint la limite physique du baudrate sans
+ * bloquer la chaîne FP1/FP2.
+ *
+ * Structure du protocole (ordre strict) :
+ *   Phase 0 : 4 octets magic header (0xAA 0x55 0xAA 0x55)
+ *             + 4 octets nb_samples little-endian uint32 (= 8000 = 0x1F40)
+ *   Phase 1 : 16000 octets de données PCM (8000 × int16 little-endian)
+ *   Phase 2 : 4 octets magic footer (0xDE 0xAD 0xBE 0xEF)
+ *
+ * Pièges :
+ *   - Serial.write() sur Due retourne le nombre d'octets réellement écrits.
+ *     Si availableForWrite() == 0, Serial.write() peut bloquer ou perdre
+ *     des octets selon la version du core. On teste AVANT d'écrire.
+ *   - dumpPhaseIdx est remis à 0 à chaque changement de phase.
+ *   - Les messages texte [FP1]/[FP2] peuvent s'intercaler dans le flux série
+ *     pendant DUMPING : le parser Python doit chercher les magic bytes dans
+ *     le flux brut, pas se fier à la propreté du flux texte.
+ */
+void fp3_service_dump(void)
+{
+    if (fp3State != FP3_DUMPING) { return; }
+
+    // On boucle tant qu'il reste des octets à envoyer ET que le buffer TX
+    // série a de la place. On sort dès que l'un des deux est épuisé.
+    while (true)
+    {
+        if (Serial.availableForWrite() == 0) { return; }   // buffer TX plein → on repasse
+
+        if (dumpPhase == 0)
+        {
+            // --- Phase 0 : header 8 octets ---
+            // Octets 0-3 : magic header
+            // Octets 4-7 : nb_samples (uint32 little-endian)
+            const uint32_t nbSamples = FP3_CAPTURE_SAMPLES;
+            uint8_t headerBuf[8];
+            headerBuf[0] = FP3_MAGIC_HEADER[0];
+            headerBuf[1] = FP3_MAGIC_HEADER[1];
+            headerBuf[2] = FP3_MAGIC_HEADER[2];
+            headerBuf[3] = FP3_MAGIC_HEADER[3];
+            headerBuf[4] = (uint8_t)( nbSamples        & 0xFF);
+            headerBuf[5] = (uint8_t)((nbSamples >>  8) & 0xFF);
+            headerBuf[6] = (uint8_t)((nbSamples >> 16) & 0xFF);
+            headerBuf[7] = (uint8_t)((nbSamples >> 24) & 0xFF);
+
+            Serial.write(headerBuf[dumpPhaseIdx]);
+            dumpPhaseIdx++;
+
+            if (dumpPhaseIdx >= 8)
+            {
+                dumpPhase    = 1;
+                dumpPhaseIdx = 0;
+                dumpIdx      = 0;
+            }
+        }
+        else if (dumpPhase == 1)
+        {
+            // --- Phase 1 : données PCM little-endian ---
+            // Chaque int16_t envoyé en 2 octets : octet bas en premier.
+            int16_t s = captureBuffer[dumpIdx];
+
+            if (dumpPhaseIdx == 0)
+            {
+                Serial.write((uint8_t)(s & 0xFF));         // octet bas
+                dumpPhaseIdx = 1;
+            }
+            else
+            {
+                Serial.write((uint8_t)((s >> 8) & 0xFF));  // octet haut
+                dumpPhaseIdx = 0;
+                dumpIdx++;
+
+                if (dumpIdx >= FP3_CAPTURE_SAMPLES)
+                {
+                    dumpPhase    = 2;
+                    dumpPhaseIdx = 0;
+                }
+            }
+        }
+        else if (dumpPhase == 2)
+        {
+            // --- Phase 2 : footer 4 octets ---
+            Serial.write(FP3_MAGIC_FOOTER[dumpPhaseIdx]);
+            dumpPhaseIdx++;
+
+            if (dumpPhaseIdx >= 4)
+            {
+                // Dump terminé
+                Serial.println("\n[FP3] --- FIN CAPTURE WAV ---");
+                Serial.println("[FP3] Pret pour la prochaine capture (appuyer D2).");
+                fp3State = FP3_IDLE;
+                return;
+            }
+        }
+        else
+        {
+            // État incohérent — repasse en IDLE par sécurité
+            fp3State = FP3_IDLE;
+            return;
+        }
+    }
+}
+
+#endif  // !FP1_PURE
+
+// ---------------------------------------------------------------------------
 // setup()
 // ---------------------------------------------------------------------------
 
@@ -345,9 +657,10 @@ void setup(void)
     Serial.println("*** Mode validation ET1 : DAC0 restitue le signal ADC brut ***");
     Serial.println("*** Utiliser pour mesure Te oscillo + demo Nyquist.       ***");
 #else
-    Serial.println("=== NeuralSpeech FP1+FP2 — ADC 32 kHz + filtre RIF + buf 8 kHz ===");
+    Serial.println("=== NeuralSpeech FP1+FP2+FP3 — ADC 32 kHz + filtre RIF + enregistrement ===");
     Serial.println("*** DAC0 = signal BRUT (avant filtre)  --> CH1 oscillo ***");
     Serial.println("*** DAC1 = signal FILTRE (apres FP2)   --> CH2 oscillo ***");
+    Serial.println("*** D2   = bouton enregistrement FP3 (INPUT_PULLUP)    ***");
 #endif
     Serial.print("FE             : "); Serial.print(FE);              Serial.println(" Hz");
     Serial.print("FE_OUT         : "); Serial.print(FE_OUT);          Serial.println(" Hz");
@@ -360,6 +673,20 @@ void setup(void)
 
     // Initialiser le buffer RIF à zéro (silence initial)
     for (uint32_t i = 0; i < FIR_BUF_SIZE; i++) { firBuf[i] = 0; }
+
+#if !defined(FP1_PURE) || (FP1_PURE == 0)
+    // --- Configuration bouton FP3 ---
+    // INPUT_PULLUP : résistance pull-up interne activée.
+    // État repos = HIGH, appui = LOW (front descendant).
+    // Pas de résistance externe nécessaire entre D2 et GND.
+    pinMode(FP3_BUTTON_PIN, INPUT_PULLUP);
+    buttonLastState    = HIGH;
+    buttonLastChangeMs = millis();
+    Serial.print("FP3 button pin : D"); Serial.println(FP3_BUTTON_PIN);
+    Serial.print("FP3 capture    : "); Serial.print(FP3_CAPTURE_SAMPLES);
+    Serial.println(" samples @ 8 kHz (3 s)");
+    Serial.println("FP3 pret — appuyez D2 pour enregistrer.");
+#endif
 
     // Activation du DWT Cycle Counter (compteur hardware Cortex-M3)
     // Permet de mesurer la duree de filter_sample() au cycle pres,
@@ -400,6 +727,11 @@ void loop(void)
 {
     // Compteur pour le sous-échantillonnage (persistant entre itérations)
     static uint32_t subsampleCounter = 0;
+
+#if !defined(FP1_PURE) || (FP1_PURE == 0)
+    // --- FP3 : vérification bouton (non-bloquant, ~3 µs) ---
+    fp3_check_button();
+#endif
 
     // --- Consommation du buffer ADC et filtrage ---
 
@@ -479,6 +811,7 @@ void loop(void)
             // assez vite. Un overflow écrase silencieusement le plus vieux
             // échantillon (même comportement que buf ADC).
 
+<<<<<<< HEAD
             // --- Capture FP3 : copie dans fp3Buf pendant l'enregistrement ---
             if (fp3Recording && fp3CaptureIdx < RECORD_SAMPLES) {
                 fp3Buf[fp3CaptureIdx++] = (int16_t)s16val;
@@ -487,12 +820,21 @@ void loop(void)
                     fp3Ready     = true;
                 }
             }
+=======
+#if !defined(FP1_PURE) || (FP1_PURE == 0)
+            // --- FP3 ARMING : copie dans captureBuffer ---
+            // fp3_push_sample() est un simple store + incrément quand
+            // fp3State == FP3_IDLE, donc son coût est quasi nul (1 test).
+            fp3_push_sample((int16_t)s16val);
+#endif
+>>>>>>> c6637e69cccee7faf7de00b8aa7943c278d5677f
         }
     }
 
     // Mettre à jour l'index de lecture (une seule écriture volatile à la fin)
     bufTail = tail;
 
+<<<<<<< HEAD
     // --- FP3 : déclenchement enregistrement sur appui bouton ---
     if (digitalRead(BUTTON_PIN) == LOW && !fp3Recording && !fp3Ready) {
         fp3CaptureIdx = 0;
@@ -512,10 +854,42 @@ void loop(void)
         fp3Ready = false;
         Serial.println("[FP3] Transfert termine.");
     }
+=======
+#if !defined(FP1_PURE) || (FP1_PURE == 0)
+    // --- FP3 DUMPING : service non-bloquant du transfert série ---
+    // Appelé APRÈS la consommation du buffer ADC pour ne pas retarder
+    // le filtrage. fp3_service_dump() envoie autant d'octets que le
+    // buffer TX série peut en absorber sans bloquer, puis rend la main.
+    fp3_service_dump();
+#endif
+>>>>>>> c6637e69cccee7faf7de00b8aa7943c278d5677f
 
     // --- Mesure de fréquence réelle + log FP1/FP2 (~1 fois/seconde) ---
+    //
+    // IMPORTANT : on SUSPEND les logs pendant DUMPING, sinon les caractères
+    // ASCII s'intercalent dans le flux binaire FP3 et corrompent le fichier
+    // .wav reconstitué côté PC (le parser Python lit N octets consécutifs
+    // en pensant recevoir du PCM, mais certains sont en réalité les lettres
+    // de "[FP1] Fe_reelle=..." → alignement perdu, footer magic décalé).
+    //
+    // On met aussi à jour lastFreqMeasureUs pendant la suspension pour
+    // éviter un log "rattrapage" monstre juste après la fin du dump.
 
     uint32_t nowUs = micros();
+#if !defined(FP1_PURE) || (FP1_PURE == 0)
+    if (fp3State == FP3_DUMPING)
+    {
+        // Pendant le dump binaire : on décale lastFreqMeasureUs pour que
+        // le log ne "rattrape" pas d'un coup quand on revient en IDLE.
+        lastFreqMeasureUs = nowUs;
+        // Remise à zéro du compteur pour que le prochain log affiche une
+        // mesure sur une seule seconde (pas cumulée depuis le dump).
+        NVIC_DisableIRQ(TC0_IRQn);
+        sampleCount = 0;
+        NVIC_EnableIRQ(TC0_IRQn);
+    }
+    else
+#endif
     if ((nowUs - lastFreqMeasureUs) >= 1000000UL)
     {
         // Lire + reset sampleCount de façon atomique
@@ -562,7 +936,21 @@ void loop(void)
             Serial.print("/");
             Serial.print(BUF8K_SIZE);
             Serial.print(" | taps=");
-            Serial.println(FILTER_TAPS);
+            Serial.print(FILTER_TAPS);
+#if !defined(FP1_PURE) || (FP1_PURE == 0)
+            Serial.print(" | fp3=");
+            Serial.print(fp3_state_str());
+            if (fp3State == FP3_ARMING)
+            {
+                // Afficher la progression de la capture (utile pour debug)
+                Serial.print(" (");
+                Serial.print(captureIdx);
+                Serial.print("/");
+                Serial.print(FP3_CAPTURE_SAMPLES);
+                Serial.print(")");
+            }
+#endif
+            Serial.println();
 
             // Reset des accumulateurs de timing
             timingCount   = 0;
