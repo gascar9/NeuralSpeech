@@ -115,6 +115,12 @@ constexpr int16_t ADC_MIDSCALE      = 2048;
 /** Nombre d'échantillons sur lesquels on moyennise le temps de filtrage */
 constexpr uint32_t TIMING_WINDOW    = 1000;
 
+/** Broche bouton FP3 — INPUT_PULLUP : LOW quand pressé */
+constexpr uint32_t BUTTON_PIN       = 2;
+
+/** Nombre d'échantillons enregistrés pour FP3 : 2 s à 8 kHz */
+constexpr uint32_t RECORD_SAMPLES   = 16000;
+
 // ---------------------------------------------------------------------------
 // Buffer circulaire ADC (producteur = ISR, consommateur = loop)
 // ---------------------------------------------------------------------------
@@ -136,6 +142,14 @@ volatile uint32_t bufTail = 0;
 volatile int16_t  buf8k[BUF8K_SIZE];
 volatile uint32_t buf8kHead = 0;   // producteur (loop — filtrage)
 volatile uint32_t buf8kTail = 0;   // consommateur (FP3 — transfert série)
+
+// ---------------------------------------------------------------------------
+// Buffer de capture FP3 (8000 échantillons = 1 s à 8 kHz, 16 Kio)
+// ---------------------------------------------------------------------------
+static int16_t  fp3Buf[RECORD_SAMPLES];
+static bool     fp3Recording  = false;   // capture en cours
+static uint32_t fp3CaptureIdx = 0;       // prochain index à écrire
+static bool     fp3Ready      = false;   // capture terminée, prête à envoyer
 
 // ---------------------------------------------------------------------------
 // Buffer circulaire interne du filtre RIF
@@ -355,6 +369,8 @@ void setup(void)
     DWT_CYCCNT  = 0;                 // reset compteur
     DWT_CTRL   |= DWT_CTRL_CYCCNTENA; // enable cycle counter
 
+    pinMode(BUTTON_PIN, INPUT_PULLUP);
+
     configureADC();
     configureDAC();
     configureTC0();
@@ -462,11 +478,40 @@ void loop(void)
             // Note : pas de protection overflow ici — FP3 doit consommer
             // assez vite. Un overflow écrase silencieusement le plus vieux
             // échantillon (même comportement que buf ADC).
+
+            // --- Capture FP3 : copie dans fp3Buf pendant l'enregistrement ---
+            if (fp3Recording && fp3CaptureIdx < RECORD_SAMPLES) {
+                fp3Buf[fp3CaptureIdx++] = (int16_t)s16val;
+                if (fp3CaptureIdx >= RECORD_SAMPLES) {
+                    fp3Recording = false;
+                    fp3Ready     = true;
+                }
+            }
         }
     }
 
     // Mettre à jour l'index de lecture (une seule écriture volatile à la fin)
     bufTail = tail;
+
+    // --- FP3 : déclenchement enregistrement sur appui bouton ---
+    if (digitalRead(BUTTON_PIN) == LOW && !fp3Recording && !fp3Ready) {
+        fp3CaptureIdx = 0;
+        fp3Recording  = true;
+        Serial.println("[FP3] Enregistrement 1 s en cours...");
+        while (digitalRead(BUTTON_PIN) == LOW) {}   // attendre relachement bouton
+    }
+
+    // --- FP3 : transfert série quand les 8000 échantillons sont capturés ---
+    if (fp3Ready) {
+        Serial.println("FP3:START");
+        for (uint32_t i = 0; i < RECORD_SAMPLES; i++) {
+            int16_t s = fp3Buf[i];
+            Serial.write((uint8_t)(s        & 0xFF));
+            Serial.write((uint8_t)((s >> 8) & 0xFF));
+        }
+        fp3Ready = false;
+        Serial.println("[FP3] Transfert termine.");
+    }
 
     // --- Mesure de fréquence réelle + log FP1/FP2 (~1 fois/seconde) ---
 
