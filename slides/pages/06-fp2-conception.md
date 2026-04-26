@@ -28,7 +28,7 @@ Optimal au sens « plus petit ordre pour un gabarit donné » → **40 taps** (v
 
 ::right::
 
-<img src="../../rapport/figures/FP2/filter_response.png" class="rounded-lg shadow-md" />
+<img src="/fp2_filter_response.png" class="rounded-lg shadow-md" />
 
 <div class="text-xs opacity-70 text-center mt-2">
 Réponse en fréquence du RIF 40 taps.<br>

@@ -3,4 +3,6 @@ package-lock.json
 yarn.lock
 .slidev/
 dist/
-*.pdf
+
+# On versionne soutenance-1.pdf pour que le team le récupère sans Node/Slidev
+# Tout autre PDF généré reste ignoré (PNG exports, builds intermédiaires…)

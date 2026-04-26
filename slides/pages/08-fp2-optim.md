@@ -28,7 +28,7 @@ layoutClass: gap-8
 
 ::right::
 
-<img src="../../assets/FP2/FP2Results.png" class="rounded shadow-md mt-4" />
+<img src="/fp2_console_dwt.png" class="rounded shadow-md mt-4" />
 
 <div class="text-xs opacity-70 text-center mt-2">
 Console série mesurée par le compteur de cycles<br>
