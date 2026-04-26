@@ -54,6 +54,22 @@ src: ./pages/02-architecture.md
 ---
 
 ---
+src: ./pages/02b-archi-hardware.md
+---
+
+---
+src: ./pages/02c-archi-software.md
+---
+
+---
+src: ./pages/02d-algorigramme.md
+---
+
+---
+src: ./pages/02e-algorigramme-loop.md
+---
+
+---
 src: ./pages/03-fp1-conception.md
 ---
 
