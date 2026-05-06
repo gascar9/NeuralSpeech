@@ -139,3 +139,29 @@ def dct_q15(log_mel: np.ndarray) -> np.ndarray:
             s += int(log_mel[m]) * int(tables.DCT_Q15[k][m])
         out[k] = s >> 15
     return out
+
+
+def compute_mfcc(audio_int16: np.ndarray) -> np.ndarray:
+    """Mirror of compute_mfcc() in lib/mfcc/src/mfcc.cpp.
+    Returns int16 (62, 13) matrix in Q11 format.
+    """
+    assert audio_int16.dtype == np.int16
+    assert len(audio_int16) == 8000
+
+    audio = preemphasis_q15(audio_int16)
+
+    mfcc = np.zeros((62, 13), dtype=np.int16)
+    for f in range(62):
+        start = f * 128
+        # Frame with zero-padding
+        frame = np.zeros(256, dtype=np.int16)
+        end = min(start + 256, 8000)
+        frame[:end - start] = audio[start:end]
+
+        windowed = hamming_q15(frame)
+        re, im = fft_q15_radix2(windowed.copy(), np.zeros(256, dtype=np.int16))
+        power = magnitude_squared(re, im)
+        mel = mel_filter_bank(power)
+        log_mel = log2_q15(mel)
+        mfcc[f] = dct_q15(log_mel)
+    return mfcc
