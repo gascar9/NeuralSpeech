@@ -51,6 +51,12 @@ BAUDRATE      = 250_000
 SAMPLE_RATE   = 8_000
 EXPECTED_SAMPLES = 8_000     # 1 s @ 8 kHz
 
+# MFCC block constants (FP4 — must match src/main.cpp)
+MFCC_HEADER = b"\xCA\xFE\xBA\xBE"
+MFCC_FOOTER = b"\xC0\xDE\xBA\xBE"
+MFCC_FRAMES = 62
+MFCC_COEFS  = 13
+
 
 def detect_port() -> str | None:
     """Retourne le premier port série 'usb' détecté, ou None."""
@@ -98,6 +104,37 @@ def save_wav(path: str, samples_bytes: bytes) -> None:
         wf.setsampwidth(2)          # int16 = 2 octets
         wf.setframerate(SAMPLE_RATE)
         wf.writeframes(samples_bytes)
+
+
+def receive_mfcc(ser: serial.Serial, timeout_s: float = 5.0):
+    """Receive the MFCC block after the WAV dump. Returns int16 (62, 13) numpy array."""
+    import numpy as np
+
+    # Wait for MFCC magic header
+    raw = read_until(ser, MFCC_HEADER, timeout_s=timeout_s)
+
+    n_frames = struct.unpack("<I", ser.read(4))[0]
+    n_coefs  = struct.unpack("<I", ser.read(4))[0]
+    if n_frames != MFCC_FRAMES or n_coefs != MFCC_COEFS:
+        raise ValueError(f"Unexpected MFCC dims: {n_frames}x{n_coefs}")
+
+    payload_size = n_frames * n_coefs * 2
+    payload = bytearray()
+    while len(payload) < payload_size:
+        chunk = ser.read(payload_size - len(payload))
+        if chunk:
+            payload += chunk
+
+    footer = ser.read(4)
+    if footer != MFCC_FOOTER:
+        print(f"WARNING : MFCC footer incorrect ({footer.hex()})")
+
+    return np.frombuffer(bytes(payload), dtype=np.int16).reshape(n_frames, n_coefs)
+
+
+def save_mfcc(path: str, mfcc) -> None:
+    import numpy as np
+    np.save(path, mfcc)
 
 
 def main() -> int:
@@ -207,6 +244,17 @@ def main() -> int:
     print(f"\n✓ WAV écrit : {out_path}  ({size_kb:.1f} Kio)")
     print(f"  Mono, 16 bits, {SAMPLE_RATE} Hz, {nb_samples/SAMPLE_RATE:.2f} s")
     print("\nOuvre-le dans Audacity :  File → Open → " + os.path.basename(out_path))
+
+    # Receive MFCC block (FP4)
+    try:
+        import numpy as np
+        mfcc = receive_mfcc(ser)
+        mfcc_path = out_path.replace(".wav", ".mfcc.npy")
+        save_mfcc(mfcc_path, mfcc)
+        print(f"✓ MFCC écrit : {mfcc_path}  shape={mfcc.shape} dtype={mfcc.dtype}")
+        print(f"  range: [{mfcc.min()}, {mfcc.max()}], non-zero values: {(mfcc != 0).sum()}/{mfcc.size}")
+    except (TimeoutError, ValueError, ImportError) as e:
+        print(f"WARNING : pas de MFCC reçue ({e})")
 
     ser.close()
     return 0
