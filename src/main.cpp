@@ -34,6 +34,7 @@
 
 #include <Arduino.h>
 #include "filter_coefs.h"   // FILTER_TAPS, FILTER_COEFS — généré par design_filter.py
+#include "mfcc.h"            // compute_mfcc(), MFCC_FRAMES, MFCC_COEFS
 
 // ---------------------------------------------------------------------------
 // Registres DWT Cortex-M3 (Data Watchpoint & Trace — Cycle Counter)
@@ -196,9 +197,11 @@ static uint32_t firBufHead = 0;
  *   FP3_DUMPING : envoi du contenu via Serial (non-bloquant).
  */
 enum Fp3State : uint8_t {
-    FP3_IDLE    = 0,
-    FP3_ARMING  = 1,
-    FP3_DUMPING = 2
+    FP3_IDLE           = 0,
+    FP3_ARMING         = 1,
+    FP3_DUMPING        = 2,
+    FP3_COMPUTING_MFCC = 3,
+    FP3_DUMPING_MFCC   = 4,
 };
 
 static volatile Fp3State fp3State = FP3_IDLE;
@@ -237,6 +240,18 @@ static uint32_t buttonLastChangeMs = 0;
 /** Dernier état lu sur le pin bouton (HIGH=relâché, LOW=pressé) */
 static uint8_t  buttonLastState = HIGH;
 
+// ---------------------------------------------------------------------------
+// FP4 — Matrice MFCC et constantes de protocole dump
+// ---------------------------------------------------------------------------
+
+// MFCC matrix — int16 Q11 result of compute_mfcc(), persistent for FP6 inference
+static int16_t mfccMatrix[MFCC_FRAMES][MFCC_COEFS];
+static uint32_t mfccDumpIdx = 0;
+
+constexpr uint8_t MFCC_HEADER_BYTES[4] = { 0xCA, 0xFE, 0xBA, 0xBE };
+constexpr uint8_t MFCC_FOOTER_BYTES[4] = { 0xC0, 0xDE, 0xBA, 0xBE };
+constexpr size_t MFCC_PAYLOAD_BYTES = MFCC_FRAMES * MFCC_COEFS * 2;
+
 #endif  // !FP1_PURE
 
 // ---------------------------------------------------------------------------
@@ -271,6 +286,7 @@ int16_t  filter_sample(uint16_t new_sample);
 void     fp3_check_button(void);
 void     fp3_push_sample(int16_t sample);
 void     fp3_service_dump(void);
+void     fp3_service_mfcc_dump(void);
 const char* fp3_state_str(void);
 #endif
 
@@ -432,10 +448,12 @@ const char* fp3_state_str(void)
 {
     switch (fp3State)
     {
-        case FP3_IDLE:    return "IDLE";
-        case FP3_ARMING:  return "ARMING";
-        case FP3_DUMPING: return "DUMPING";
-        default:          return "???";
+        case FP3_IDLE:           return "IDLE";
+        case FP3_ARMING:         return "ARMING";
+        case FP3_DUMPING:        return "DUMPING";
+        case FP3_COMPUTING_MFCC: return "COMPUTING_MFCC";
+        case FP3_DUMPING_MFCC:   return "DUMPING_MFCC";
+        default:                 return "???";
     }
 }
 
@@ -620,10 +638,11 @@ void fp3_service_dump(void)
 
             if (dumpPhaseIdx >= 4)
             {
-                // Dump terminé
+                // Dump WAV terminé → chaîner vers le calcul MFCC puis son dump
                 Serial.println("\n[FP3] --- FIN CAPTURE WAV ---");
-                Serial.println("[FP3] Pret pour la prochaine capture (appuyer D2).");
-                fp3State = FP3_IDLE;
+                Serial.flush();
+                // After WAV dump completes, chain into MFCC compute then dump
+                fp3State = FP3_COMPUTING_MFCC;
                 return;
             }
         }
@@ -633,6 +652,49 @@ void fp3_service_dump(void)
             fp3State = FP3_IDLE;
             return;
         }
+    }
+}
+
+/**
+ * Non-blocking MFCC dump over serial. Called on every loop() iteration.
+ *
+ * Sends the magic header, payload (62×13 int16 LE), and footer in chunks
+ * of up to whatever Serial.availableForWrite() allows.
+ */
+void fp3_service_mfcc_dump(void) {
+    if (fp3State != FP3_DUMPING_MFCC) return;
+
+    const uint8_t* payload = (const uint8_t*)&mfccMatrix[0][0];
+    constexpr size_t HDR  = 4;
+    constexpr size_t LEN  = 4 + 4;          // n_frames + n_coefs
+    constexpr size_t TOTAL = HDR + LEN + MFCC_PAYLOAD_BYTES + 4;  // header+lens+payload+footer
+
+    while (Serial.availableForWrite() >= 8 && mfccDumpIdx < TOTAL) {
+        uint8_t b;
+        if (mfccDumpIdx < HDR) {
+            b = MFCC_HEADER_BYTES[mfccDumpIdx];
+        } else if (mfccDumpIdx < HDR + 4) {
+            // n_frames as uint32 LE
+            uint32_t v = MFCC_FRAMES;
+            b = (v >> ((mfccDumpIdx - HDR) * 8)) & 0xFF;
+        } else if (mfccDumpIdx < HDR + 8) {
+            // n_coefs as uint32 LE
+            uint32_t v = MFCC_COEFS;
+            b = (v >> ((mfccDumpIdx - HDR - 4) * 8)) & 0xFF;
+        } else if (mfccDumpIdx < HDR + LEN + MFCC_PAYLOAD_BYTES) {
+            b = payload[mfccDumpIdx - HDR - LEN];
+        } else {
+            b = MFCC_FOOTER_BYTES[mfccDumpIdx - HDR - LEN - MFCC_PAYLOAD_BYTES];
+        }
+        Serial.write(b);
+        mfccDumpIdx++;
+    }
+
+    if (mfccDumpIdx >= TOTAL) {
+        Serial.println("\n[FP4] --- FIN DUMP MFCC ---");
+        Serial.println("[FP4] Pret pour la prochaine capture (appuyer D2).");
+        fp3State = FP3_IDLE;
+        mfccDumpIdx = 0;
     }
 }
 
@@ -821,11 +883,27 @@ void loop(void)
     bufTail = tail;
 
 #if !defined(FP1_PURE) || (FP1_PURE == 0)
+    // --- FP3_COMPUTING_MFCC : run MFCC on captureBuffer (blocking ~17 ms) ---
+    if (fp3State == FP3_COMPUTING_MFCC) {
+        // Flush adcBuffer to avoid overflow during the ~17 ms blocking compute
+        NVIC_DisableIRQ(TC0_IRQn);
+        bufTail = bufHead;
+        NVIC_EnableIRQ(TC0_IRQn);
+
+        // captureBuffer holds 8000 int16 samples at 8 kHz (post-FP2 filtered).
+        // compute_mfcc does in-place preemphasis on its input, so we pass it directly.
+        compute_mfcc(captureBuffer, mfccMatrix);
+
+        mfccDumpIdx = 0;
+        fp3State = FP3_DUMPING_MFCC;
+    }
+
     // --- FP3 DUMPING : service non-bloquant du transfert série ---
     // Appelé APRÈS la consommation du buffer ADC pour ne pas retarder
     // le filtrage. fp3_service_dump() envoie autant d'octets que le
     // buffer TX série peut en absorber sans bloquer, puis rend la main.
     fp3_service_dump();
+    fp3_service_mfcc_dump();
 #endif
 
     // --- Mesure de fréquence réelle + log FP1/FP2 (~1 fois/seconde) ---
@@ -841,7 +919,7 @@ void loop(void)
 
     uint32_t nowUs = micros();
 #if !defined(FP1_PURE) || (FP1_PURE == 0)
-    if (fp3State == FP3_DUMPING)
+    if (fp3State == FP3_DUMPING || fp3State == FP3_COMPUTING_MFCC || fp3State == FP3_DUMPING_MFCC)
     {
         // Pendant le dump binaire : on décale lastFreqMeasureUs pour que
         // le log ne "rattrape" pas d'un coup quand on revient en IDLE.
