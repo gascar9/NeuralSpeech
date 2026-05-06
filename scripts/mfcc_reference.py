@@ -85,3 +85,18 @@ def magnitude_squared(re: np.ndarray, im: np.ndarray) -> np.ndarray:
     r = re[:128].astype(np.int32)
     i = im[:128].astype(np.int32)
     return r * r + i * i
+
+
+def mel_filter_bank(power: np.ndarray) -> np.ndarray:
+    """Mirror of mel_filter_bank() in lib/mfcc/src/mel_bank.cpp"""
+    out = np.zeros(26, dtype=np.int32)
+    for m in range(26):
+        flt = tables.MEL_FILTERS[m]
+        energy = 0
+        coef_i = 0
+        for k in range(flt["start"], flt["end"]):
+            scaled = int(power[k]) >> 15
+            energy += scaled * int(flt["coefs_q15"][coef_i])
+            coef_i += 1
+        out[m] = energy
+    return out
