@@ -93,6 +93,40 @@ Marge restante & $\sim$\SI{74}{\kibi\byte} & amplement suffisant pour MFCC (FP4)
 \label{tab:fp3-memory}
 \end{table}
 
+\subsubsection{Calibrage de la dynamique amplitude}
+\label{sec:fp3-saturation-fix}
+
+Une première version souffrait d'un bug de \emph{normalisation Q15} dans la fonction \texttt{filter\_sample()} : le résultat de la convolution était décalé de \texttt{>>~10} au lieu de \texttt{>>~15}. Le signal filtré sortait amplifié d'un facteur \num{32}, donc intégralement écrêté par le clamp défensif \([-2048,\,+2047]\) en aval. L'analyse quantitative d'un \texttt{.wav} archivé montrait \textbf{\SI{99.2}{\percent}} d'échantillons pile à \(\pm 2047\), ce qui correspond auditivement à une saturation continue (le mot enregistré était difficilement intelligible à la lecture).
+
+La correction comporte deux modifications complémentaires :
+
+\begin{enumerate}
+    \item \textbf{Normalisation Q15 correcte} dans \texttt{filter\_sample()} : le shift final passe de \texttt{>>~10} à \texttt{>>~15}, conformément à la définition Q15 (coefficients multipliés par les samples puis normalisés par \(2^{15}\)). La sortie filtrée retombe alors dans \([-2048,\,+2047]\) comme prévu théoriquement.
+    \item \textbf{Mise à l'échelle pleine dynamique} pour le stockage WAV : le signal filtré est multiplié par \num{16} (\texttt{<<~4}) avant écriture dans \texttt{captureBuffer}, pour utiliser la pleine plage \([-32768,\,+32767]\) du format WAV 16 bits. Sans cette mise à l'échelle, le signal n'utilisait que \(1/16\) de la dynamique disponible, obligeant l'auditeur à amplifier sous Audacity et à amplifier également le bruit de quantification. La sortie \texttt{DAC1} (oscilloscope) reste, elle, en plage 12 bits non scalée.
+\end{enumerate}
+
+Validation quantitative sur \num{4} enregistrements consécutifs post-correction (\og salut~\fg{}, \og électronique~\fg{}) comparés à l'archive pré-correction :
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{0.85\linewidth}{@{}X r r@{}}
+\toprule
+\textbf{Métrique} & \textbf{Avant fix} & \textbf{Après fix} \\
+\midrule
+Amplitude max (\(\lvert s\rvert\))           & \num{2048}        & \num{27000}--\num{30000} \\
+RMS                                          & \num{2043}        & \(\sim\)\num{10000} \\
+Échantillons pile à \(\pm 2047\)             & \SI{99.2}{\percent} & \(\leq \SI{0.1}{\percent}\) \\
+Échantillons pile à \(\pm 32767\)            & \SI{0}{\percent}  & \SI{0}{\percent} \\
+Dynamique exploitée du WAV 16 bits           & \SI{6.3}{\percent} & \SI{85}{\percent}--\SI{92}{\percent} \\
+\bottomrule
+\end{tabularx}
+\caption{Validation quantitative de la correction de saturation FP3 (5 fichiers \texttt{.wav} analysés).}
+\label{tab:fp3-saturation-fix}
+\end{table}
+
+À l'écoute, le mot prononcé est désormais \emph{intelligible et naturellement modulé}, ce qui valide \etref{4} sans ambiguïté.
+
 \subsubsection{Script Python côté PC}
 
 Le fichier \verb|scripts/fp3_recv.py| implémente le récepteur : ouverture du port série (auto-détection \texttt{usbmodem}/\texttt{ACM}/\texttt{COM}), lecture octet par octet jusqu'à détection du magic header, extraction du nombre de samples et du payload, vérification du footer, écriture du \verb|.wav| via le module standard Python \verb|wave|. Dépendance unique : \verb|pyserial| (\verb|pip install pyserial|).
@@ -130,7 +164,7 @@ with wave.open(out_path, "wb") as wf:
 
 \subsubsection{Résultats}
 
-\TODO{Capture Audacity de la forme d'onde (\texttt{File~→~Open~→~recording.wav}, puis \texttt{Ctrl+F} pour ajuster le zoom). Attendue : 4 zones d'énergie distinctes correspondant aux syllabes « É-lec-tro-nique », amplitude \SI{\sim10}{\percent}-\SI{20}{\percent} de la pleine échelle, pas de clipping. Fichier \texttt{assets/FP3/fp3\_audacity\_waveform.png}.}
+\TODO{Capture Audacity de la forme d'onde (\texttt{File~→~Open~→~recording.wav}, puis \texttt{Ctrl+F} pour ajuster le zoom). Attendue (post-calibrage, cf.~\ref{sec:fp3-saturation-fix}) : 4 zones d'énergie distinctes correspondant aux syllabes « É-lec-tro-nique », amplitude max $\sim$\SI{85}{\percent} de la pleine échelle, pas de clipping ni plateau saturé. Fichier \texttt{assets/FP3/fp3\_audacity\_waveform.png}.}
 
 \TODO{Capture Audacity du spectrogramme (piste~→~menu~→~\texttt{Spectrogram}). Attendue : bandes horizontales bien contrastées dans la plage 0-\SI{4}{\kilo\hertz} (formants vocaux F1, F2, F3), énergie quasi-nulle au-dessus de \SI{4}{\kilo\hertz} grâce au filtre FP2. Fichier \texttt{assets/FP3/fp3\_audacity\_spectrogram.png}.}
 

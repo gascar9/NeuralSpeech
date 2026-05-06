@@ -147,9 +147,6 @@ constexpr uint32_t TIMING_WINDOW    = 1000;
 /** Broche bouton FP3 — INPUT_PULLUP : LOW quand pressé */
 constexpr uint32_t BUTTON_PIN       = 2;
 
-/** Nombre d'échantillons enregistrés pour FP3 : 2 s à 8 kHz */
-constexpr uint32_t RECORD_SAMPLES   = 16000;
-
 // ---------------------------------------------------------------------------
 // Buffer circulaire ADC (producteur = ISR, consommateur = loop)
 // ---------------------------------------------------------------------------
@@ -171,14 +168,6 @@ volatile uint32_t bufTail = 0;
 volatile int16_t  buf8k[BUF8K_SIZE];
 volatile uint32_t buf8kHead = 0;   // producteur (loop — filtrage)
 volatile uint32_t buf8kTail = 0;   // consommateur (FP3 — transfert série)
-
-// ---------------------------------------------------------------------------
-// Buffer de capture FP3 (8000 échantillons = 1 s à 8 kHz, 16 Kio)
-// ---------------------------------------------------------------------------
-static int16_t  fp3Buf[RECORD_SAMPLES];
-static bool     fp3Recording  = false;   // capture en cours
-static uint32_t fp3CaptureIdx = 0;       // prochain index à écrire
-static bool     fp3Ready      = false;   // capture terminée, prête à envoyer
 
 // ---------------------------------------------------------------------------
 // Buffer circulaire interne du filtre RIF
@@ -367,7 +356,13 @@ int16_t filter_sample(uint16_t new_sample)
     }
 
     // Normalisation Q15 : on a multiplié les coefs par 32767, on divise par 2^15
-    // Résultat centré sur 0, plage théorique [-2048, +2047] (même que l'entrée)
+    // Résultat centré sur 0, plage théorique [-2048, +2047] (même que l'entrée).
+    //
+    // BUG HISTORIQUE : avant le 2026-05-06, le shift était (>> 10), ce qui
+    // amplifiait le signal d'un facteur 32 (=2^5). Combiné au clamp [-2048,+2047]
+    // dans la consumer loop, ~99% des samples étaient écrêtés à ±2047 → audio
+    // FP3 massivement saturé (cf. histogrammes recording_*.wav d'avril 2026).
+    // Le bon shift est >> 15, conformément à la définition du Q15.
     return (int16_t)(acc >> 15);
 }
 
@@ -798,12 +793,14 @@ void loop(void)
         {
             subsampleCounter = 0;
 
-            // filtered est déjà int16_t centré sur 0 — on l'écrit directement.
-            // Clamp défensif : en théorie filter_sample retourne [-2048, +2047]
-            // mais une saturation interne peut rarement produire ±32767.
-            int32_t s16val = (int32_t)filtered;
-            if (s16val < -2048) { s16val = -2048; }
-            if (s16val >  2047) { s16val =  2047; }
+            // filtered est dans [-2048, +2047] (sortie 12 bits centrée sur 0).
+            // On le ramène à la pleine dynamique int16 [-32768, +32767] avec un
+            // shift gauche de 4 bits (×16). Cela produit un WAV à volume normal
+            // sans devoir amplifier dans Audacity (qui amplifierait le bruit de
+            // quantification). Le DAC1, lui, garde la plage 12 bits (cf. plus haut).
+            int32_t s16val = (int32_t)filtered << 4;
+            if (s16val < -32768) { s16val = -32768; }
+            if (s16val >  32767) { s16val =  32767; }
 
             buf8k[buf8kHead] = (int16_t)s16val;
             buf8kHead = (buf8kHead + 1) & BUF8K_MASK;
@@ -811,50 +808,18 @@ void loop(void)
             // assez vite. Un overflow écrase silencieusement le plus vieux
             // échantillon (même comportement que buf ADC).
 
-<<<<<<< HEAD
-            // --- Capture FP3 : copie dans fp3Buf pendant l'enregistrement ---
-            if (fp3Recording && fp3CaptureIdx < RECORD_SAMPLES) {
-                fp3Buf[fp3CaptureIdx++] = (int16_t)s16val;
-                if (fp3CaptureIdx >= RECORD_SAMPLES) {
-                    fp3Recording = false;
-                    fp3Ready     = true;
-                }
-            }
-=======
 #if !defined(FP1_PURE) || (FP1_PURE == 0)
             // --- FP3 ARMING : copie dans captureBuffer ---
             // fp3_push_sample() est un simple store + incrément quand
             // fp3State == FP3_IDLE, donc son coût est quasi nul (1 test).
             fp3_push_sample((int16_t)s16val);
 #endif
->>>>>>> c6637e69cccee7faf7de00b8aa7943c278d5677f
         }
     }
 
     // Mettre à jour l'index de lecture (une seule écriture volatile à la fin)
     bufTail = tail;
 
-<<<<<<< HEAD
-    // --- FP3 : déclenchement enregistrement sur appui bouton ---
-    if (digitalRead(BUTTON_PIN) == LOW && !fp3Recording && !fp3Ready) {
-        fp3CaptureIdx = 0;
-        fp3Recording  = true;
-        Serial.println("[FP3] Enregistrement 1 s en cours...");
-        while (digitalRead(BUTTON_PIN) == LOW) {}   // attendre relachement bouton
-    }
-
-    // --- FP3 : transfert série quand les 8000 échantillons sont capturés ---
-    if (fp3Ready) {
-        Serial.println("FP3:START");
-        for (uint32_t i = 0; i < RECORD_SAMPLES; i++) {
-            int16_t s = fp3Buf[i];
-            Serial.write((uint8_t)(s        & 0xFF));
-            Serial.write((uint8_t)((s >> 8) & 0xFF));
-        }
-        fp3Ready = false;
-        Serial.println("[FP3] Transfert termine.");
-    }
-=======
 #if !defined(FP1_PURE) || (FP1_PURE == 0)
     // --- FP3 DUMPING : service non-bloquant du transfert série ---
     // Appelé APRÈS la consommation du buffer ADC pour ne pas retarder
@@ -862,7 +827,6 @@ void loop(void)
     // buffer TX série peut en absorber sans bloquer, puis rend la main.
     fp3_service_dump();
 #endif
->>>>>>> c6637e69cccee7faf7de00b8aa7943c278d5677f
 
     // --- Mesure de fréquence réelle + log FP1/FP2 (~1 fois/seconde) ---
     //
