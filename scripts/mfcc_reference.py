@@ -128,3 +128,14 @@ def log2_q15(mel_energies: np.ndarray) -> np.ndarray:
         result = max(-32767, min(32767, result))
         out[m] = result
     return out
+
+
+def dct_q15(log_mel: np.ndarray) -> np.ndarray:
+    """Mirror of dct_q15() in lib/mfcc/src/dct.cpp"""
+    out = np.zeros(13, dtype=np.int16)
+    for k in range(13):
+        s = 0
+        for m in range(26):
+            s += int(log_mel[m]) * int(tables.DCT_Q15[k][m])
+        out[k] = s >> 15
+    return out
