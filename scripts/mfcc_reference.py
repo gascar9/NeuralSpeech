@@ -28,3 +28,53 @@ def hamming_q15(frame_int16: np.ndarray) -> np.ndarray:
         windowed = (int(frame_int16[n]) * int(tables.HAMMING_LUT[n])) >> 15
         out[n] = windowed
     return out
+
+
+def _bit_reverse(x: int, log2n: int) -> int:
+    r = 0
+    for _ in range(log2n):
+        r = (r << 1) | (x & 1)
+        x >>= 1
+    return r
+
+
+def fft_q15_radix2(re: np.ndarray, im: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Mirror of fft_q15_radix2() in lib/mfcc/src/fft.cpp"""
+    N = 256
+    LOG2_N = 8
+    re = re.copy().astype(np.int16)
+    im = im.copy().astype(np.int16)
+
+    # Bit-reversal
+    for i in range(N):
+        j = _bit_reverse(i, LOG2_N)
+        if j > i:
+            re[i], re[j] = re[j], re[i]
+            im[i], im[j] = im[j], im[i]
+
+    # Butterflies
+    for s in range(1, LOG2_N + 1):
+        m = 1 << s
+        m_half = m >> 1
+        tw_step = N // m
+        for k in range(0, N, m):
+            for j in range(m_half):
+                idx_w = j * tw_step
+                wr = int(tables.TWIDDLE_COS[idx_w])
+                wi = -int(tables.TWIDDLE_SIN[idx_w])
+
+                t_idx = k + j + m_half
+                u_idx = k + j
+
+                tr = (wr * int(re[t_idx]) - wi * int(im[t_idx])) >> 15
+                ti = (wr * int(im[t_idx]) + wi * int(re[t_idx])) >> 15
+
+                ur = int(re[u_idx])
+                ui = int(im[u_idx])
+
+                re[u_idx] = (ur + tr) >> 1
+                im[u_idx] = (ui + ti) >> 1
+                re[t_idx] = (ur - tr) >> 1
+                im[t_idx] = (ui - ti) >> 1
+
+    return re, im
