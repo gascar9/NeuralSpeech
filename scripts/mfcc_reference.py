@@ -100,3 +100,31 @@ def mel_filter_bank(power: np.ndarray) -> np.ndarray:
             coef_i += 1
         out[m] = energy
     return out
+
+
+def log2_q15(mel_energies: np.ndarray) -> np.ndarray:
+    """Mirror of log2_q15() in lib/mfcc/src/log_lut.cpp.
+
+    Output is in Q11 format (5 integer bits + 11 fractional bits, range ~[-16, +16)).
+    """
+    out = np.zeros(26, dtype=np.int16)
+    for m in range(26):
+        x = int(mel_energies[m])
+        if x == 0:
+            out[m] = -32768
+            continue
+
+        # Position of highest set bit
+        e = x.bit_length() - 1                # equivalent to 31 - clz(x) for 32-bit
+
+        # Normalized mantissa as 10-bit index
+        if e >= 10:
+            mantissa = (x >> (e - 10)) & 0x3FF
+        else:
+            mantissa = (x << (10 - e)) & 0x3FF
+
+        frac_log = int(tables.LOG2_LUT[mantissa])
+        result = (e << 11) + (frac_log >> 4)
+        result = max(-32767, min(32767, result))
+        out[m] = result
+    return out
