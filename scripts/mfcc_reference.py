@@ -78,3 +78,10 @@ def fft_q15_radix2(re: np.ndarray, im: np.ndarray) -> tuple[np.ndarray, np.ndarr
                 im[t_idx] = (ui - ti) >> 1
 
     return re, im
+
+
+def magnitude_squared(re: np.ndarray, im: np.ndarray) -> np.ndarray:
+    """Mirror of magnitude_squared() in lib/mfcc/src/magnitude.cpp"""
+    r = re[:128].astype(np.int32)
+    i = im[:128].astype(np.int32)
+    return r * r + i * i
