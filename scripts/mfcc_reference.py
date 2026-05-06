@@ -19,3 +19,12 @@ def preemphasis_q15(audio_int16: np.ndarray) -> np.ndarray:
         out[i] = max(-32768, min(32767, y))
         prev = int(x)
     return out
+
+
+def hamming_q15(frame_int16: np.ndarray) -> np.ndarray:
+    """Mirror of hamming_q15() in lib/mfcc/src/hamming.cpp"""
+    out = np.zeros(256, dtype=np.int16)
+    for n in range(256):
+        windowed = (int(frame_int16[n]) * int(tables.HAMMING_LUT[n])) >> 15
+        out[n] = windowed
+    return out
