@@ -128,7 +128,12 @@ Le critère est strict : \emph{0 différence sur les $62 \times 13 = 806$ valeur
 
 \TODO{Capture du résultat du test \texttt{scripts/test\_mfcc\_integration.py --firmware} sur 3 audios test (sin\_1khz, silence, white\_noise) avec sortie ``[OK] BIT-EXACT match''. Fichier \texttt{assets/FP4/test\_bit\_exact\_output.txt}.}
 
-\TODO{Heatmap matplotlib de la matrice MFCC 62×13 pour deux mots distincts (« bleu » vs « rouge »). Fichier \texttt{rapport/figures/mfcc\_heatmap\_bleu\_vs\_rouge.png}.}
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/mfcc_heatmap_bleu_vs_rouge.png}
+\caption{Matrice MFCC 62×13 pour les mots « bleu » et « rouge » prononcés. Les motifs visuellement distincts confirment que les MFCCs capturent assez d'information discriminante pour la classification CNN à venir (FP6).}
+\label{fig:mfcc-heatmap}
+\end{figure}
 
 \subsection{Bilan FP4}
 
