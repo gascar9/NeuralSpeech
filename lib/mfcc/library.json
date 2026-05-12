@@ -1,0 +1,11 @@
+{
+  "name": "mfcc",
+  "version": "1.0.0",
+  "description": "MFCC computation in Q15 fixed-point for SAM3X8E",
+  "keywords": "dsp,fft,q15,mfcc,arduino-due",
+  "frameworks": "arduino",
+  "platforms": "atmelsam",
+  "build": {
+    "flags": ["-O2", "-std=c++17"]
+  }
+}
