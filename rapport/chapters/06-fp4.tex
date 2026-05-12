@@ -112,11 +112,38 @@ DCT-II & 300 µs \\
 
 \subsection{Validation (ET5, ET6)}
 
-\subsubsection{Stratégie : miroir Python bit-exact}
+\subsubsection{ET5 --- Découpage en frames de 256 échantillons + recouvrement 50\,\%}
+\label{sec:fp4-et5}
+
+L'exigence \etref{5} demande que le signal audio soit séparé en frames de 256 échantillons. Notre implémentation produit \textbf{62 frames}\footnote{$\lfloor (8000 - 256) / 128 \rfloor + 1 = 61$ frames complètes ; la 62\textsuperscript{ème} est paddée avec 64 zéros pour aligner sur une grille exacte de hop = 128.} de \textbf{256 échantillons} chacune, séparées par un hop de \textbf{128 échantillons} (recouvrement de 50\,\%).
+
+\paragraph{Preuve visuelle dans Audacity.}
+Un fichier de labels Audacity (généré par \verb|scripts/audacity_et5.py|) place une étiquette par frame sur la waveform du WAV produit par notre firmware. Audacity dispose automatiquement les étiquettes qui se chevauchent sur deux rangées distinctes, ce qui rend le recouvrement de 50\,\% directement lisible :
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\linewidth]{../assets/FP4/et5_audacity_recouvrement.png}
+\caption{Validation visuelle du recouvrement (Audacity, zoom sur les frames F33 à F49 du mot « vrai »). Les labels sur deux rangées prouvent que chaque frame de 32\,ms démarre 16\,ms après la précédente, conformément à la spécification du sujet (hop length = frame size / 2).}
+\label{fig:et5-recouvrement}
+\end{figure}
+
+\paragraph{Preuve unitaire --- une frame isolée.}
+La frame 42 (à $t \approx 672\,\text{ms}$, en plein milieu du mot « vrai ») a été extraite et sauvegardée en tant que fichier \texttt{frame\_42.wav} indépendant. Ouvert dans Audacity, on voit clairement \textbf{les 256 échantillons individuels} qui constituent l'entrée du pipeline MFCC pour une itération :
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\linewidth]{../assets/FP4/et5_audacity_frame_unique.png}
+\caption{Une frame isolée (32\,ms = 256 samples PCM int16). Chaque point bleu carré est un échantillon, vu par la FFT lors de l'étape 4 du pipeline. La périodicité visible sur ce signal correspond à la fondamentale vocale ($\sim$240\,Hz) et ses premières harmoniques.}
+\label{fig:et5-frame-unique}
+\end{figure}
+
+\noindent\textbf{ET5 est ainsi validée visuellement et numériquement} : le découpage produit bien 62 frames de 256 échantillons avec recouvrement 50\,\%, et les samples PCM sont préservés sans perte du buffer d'acquisition jusqu'à l'entrée FFT.
+
+\subsubsection{ET6 --- Stratégie : miroir Python bit-exact}
 
 La validation principale est un \textbf{test bit-exact} entre le firmware et un miroir Python (\verb|scripts/mfcc_reference.py|) qui réimplémente strictement le même pipeline Q15 (avec \verb|numpy.int16|). Les deux implémentations partagent les mêmes LUTs (générées par \verb|scripts/gen_tables.py|).
 
-\begin{lstlisting}[language=Python, caption={Test bit-exact firmware ↔ Python}]
+\begin{lstlisting}[language=Python, caption={Test bit-exact firmware vs Python}]
 firmware = np.load("recording.mfcc.npy")
 reference = compute_mfcc(load_wav("recording.wav"))
 assert np.array_equal(firmware, reference)
@@ -124,7 +151,7 @@ assert np.array_equal(firmware, reference)
 
 Le critère est strict : \emph{0 différence sur les $62 \times 13 = 806$ valeurs}.
 
-\subsubsection{Résultats}
+\subsubsection{ET6 --- Résultats}
 
 \TODO{Capture du résultat du test \texttt{scripts/test\_mfcc\_integration.py --firmware} sur 3 audios test (sin\_1khz, silence, white\_noise) avec sortie ``[OK] BIT-EXACT match''. Fichier \texttt{assets/FP4/test\_bit\_exact\_output.txt}.}
 
