@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mdls -name kMDItemNumberOfPages \"/Users/gaspardboucharlat/Documents/PlatformIO/Projects/ProjetCE/NeuralSpeech_2026_V1.pdf\" \"/Users/gaspardboucharlat/Documents/PlatformIO/Projects/ProjetCE/grille critérée dévaluation de projet NeuralSpeech_soutenance 1.pdf\")",
+      "Bash(gh auth *)",
+      "Bash(git init *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(gh repo *)",
+      "Bash(git remote *)",
+      "Bash(mkdir -p /Users/gaspardboucharlat/Documents/PlatformIO/Projects/ProjetCE/.claude/agents)",
+      "Bash(git check-ignore *)",
+      "Bash(echo \"exit=$?\")"
+    ]
+  }
+}
