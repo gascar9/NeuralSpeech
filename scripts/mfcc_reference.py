@@ -137,7 +137,9 @@ def dct_q15(log_mel: np.ndarray) -> np.ndarray:
         s = 0
         for m in range(26):
             s += int(log_mel[m]) * int(tables.DCT_Q15[k][m])
-        out[k] = max(-32768, min(32767, s >> 15))
+        v = s >> 15
+        v = max(-32767, min(32767, v))
+        out[k] = v
     return out
 
 
