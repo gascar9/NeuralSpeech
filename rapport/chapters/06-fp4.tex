@@ -130,8 +130,8 @@ Le critère est strict : \emph{0 différence sur les $62 \times 13 = 806$ valeur
 
 \begin{figure}[H]
 \centering
-\includegraphics[width=0.85\linewidth]{figures/mfcc_heatmap_bleu_vs_rouge.png}
-\caption{Matrice MFCC 62×13 pour les mots « bleu » et « rouge » prononcés. Les motifs visuellement distincts confirment que les MFCCs capturent assez d'information discriminante pour la classification CNN à venir (FP6).}
+\includegraphics[width=0.85\linewidth]{figures/mfcc_heatmap_vrai_vs_faux.png}
+\caption{Matrice MFCC 62×13 pour les mots « vrai » et « faux » prononcés (use case retenu : système de réponse vocale type « Question pour un Champion »). Les motifs visuellement distincts sur les coefficients 0, 3, 4, 6 et 11 confirment que les MFCCs capturent assez d'information discriminante pour la classification CNN à venir (FP6). Différence absolue moyenne sur 806 valeurs : 11 792 (\textasciitilde 36\,\% de la dynamique int16).}
 \label{fig:mfcc-heatmap}
 \end{figure}
 
