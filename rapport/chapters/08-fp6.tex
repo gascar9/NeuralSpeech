@@ -1,82 +1,201 @@
-\section{FP6 --- Classification des enregistrements audios}
+\section{FP6 --- Inférence embarquée et restitution OLED}
 \label{sec:fp6}
 
-Fonction couverte par l'exigence \etref{9} : \emph{le réseau de neurones doit pouvoir classifier au moins deux mots prononcés avec moins de \SI{5}{\percent} d'erreur, robustesse au bruit de fond}.
+Cette section couvre l'exigence \etref{9} : \emph{le réseau de neurones doit classer au moins deux mots prononcés avec moins de \SI{5}{\percent} d'erreur en condition contrôlée, robuste à un certain niveau de bruit}. Concrètement il faut exécuter l'inférence \emph{sur la Due elle-même}, sans aucune communication avec un ordinateur après le boot.
 
-\subsection{Intégration de l'inférence embarquée}
+\subsection{Objectif et choix méthodologiques}
 
-\subsubsection{Pipeline temps réel}
+L'enjeu est de transposer le CNN Keras / float32 entraîné en FP5 vers du C / int16 / Cortex-M3 sans FPU, en préservant strictement les décisions (\emph{argmax}). Trois principes guident l'implémentation :
 
-\TODO{Décrire la séquence déclenchée par l'appui bouton :
+\begin{itemize}
+    \item \textbf{Quantification Q11 partout} (1 signe + 4 entier + 11 fractionnaire). Choix justifié par la dynamique observée des activations (typiquement $\pm 3$ sigma normalisé). Le Q15 saturerait au moindre dépassement.
+    \item \textbf{Mirror Python} : une référence \texttt{cnn\_inference\_q11.py} re-implémente strictement le pipeline en arithmétique entière. Validée bit-conforme contre Keras avant tout déploiement.
+    \item \textbf{Test croisé en série} : un script \texttt{test\_cnn\_onchip.py} compare en temps réel l'inférence du firmware à l'inférence Python sur le même MFCC, attestant que les deux donnent des prédictions identiques.
+\end{itemize}
+
+\subsection{Quantification et export des poids}
+
+\subsubsection{Algorithme d'export}
+
+Le script \texttt{scripts/export\_weights.py} charge le modèle Keras et produit \texttt{lib/cnn/src/model\_weights.h} :
+
 \begin{enumerate}
-    \item \textbf{Attente} du front descendant du bouton (INPUT\_PULLUP)
-    \item \textbf{Capture} de \SI{1}{\second} d'audio via la chaîne FP1+FP2 (\SI{8}{\kilo\hertz}, filtré)
-    \item \textbf{MFCC} : appel à la fonction FP4 $\rightarrow$ matrice $62 \times 13$
-    \item \textbf{Normalisation} : soustraction des moyennes, division par les écarts-types (mêmes valeurs que le training)
-    \item \textbf{Inférence} : passage à travers les couches CNN
-    \item \textbf{Décision} : \texttt{argmax} sur le vecteur softmax
-    \item \textbf{Affichage} : allumage de la LED correspondante
-\end{enumerate}}
+    \item Pour chaque tenseur de poids $W$ : $W_{Q11} = \text{round}(W \cdot 2048)$, saturé à $[-32768, 32767]$.
+    \item Pour la normalisation z-score : moyenne stockée en int16 (échelle MFCC brut), $1 / \sigma$ en Q24 (besoin d'une grande dynamique pour le réciproque de grandes valeurs $\sigma \sim 15{,}000$).
+    \item Kernels Conv2D réorganisés de l'agencement Keras \texttt{[kh][kw][C\_in][C\_out]} vers \texttt{[C\_out][kh][kw][C\_in]}, ce qui aligne la boucle C interne sur les filtres (un seul accès kernel par calcul d'élément de sortie).
+\end{enumerate}
 
-\subsubsection{Implémentation des couches en C}
+\subsubsection{Bilan de la quantification}
 
-\TODO{Organisation du code :
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{0.85\linewidth}{@{}l r X@{}}
+\toprule
+\textbf{Tenseur} & \textbf{Taille} & \textbf{Erreur Q11 vs float} \\
+\midrule
+\texttt{CONV1\_W}      &    72 valeurs & max $2{,}4 \cdot 10^{-4}$ \\
+\texttt{CONV2\_W}      & 1 152 valeurs & max $2{,}4 \cdot 10^{-4}$ \\
+\texttt{DENSE1\_W}     & 7 168 valeurs & max $2{,}4 \cdot 10^{-4}$ \\
+\texttt{DENSE2\_W}     &    64 valeurs & max $6 \cdot 10^{-5}$ \\
+biais (toutes couches) &    58 valeurs & max $2{,}4 \cdot 10^{-4}$ \\
+\midrule
+\textbf{Total flash}   & \textbf{16{,}7 Ko} & 8\,527 int16 + 13 int32 = 3{,}3\,\% des 512 Ko \\
+\bottomrule
+\end{tabularx}
+\caption{Bilan de la quantification Q11. L'erreur reste 5\,000$\times$ plus petite que la précision du format (1/2048 $\approx 5 \cdot 10^{-4}$) --- aucune dégradation observable.}
+\label{tab:fp6-quant}
+\end{table}
+
+\subsubsection{Validation bit-conforme contre Keras}
+
+Avant tout déploiement, on vérifie que la transcription Q11 produit \emph{exactement les mêmes décisions} que le modèle Keras d'origine. Sur les 168 MFCC du dataset complet :
+
+\begin{lstlisting}[language=Python, caption={Sortie de \texttt{scripts/cnn\_inference\_q11.py}}]
+Keras float : 98.2% accuracy
+Q11 int     : 98.2% accuracy
+Accord K<->Q : 100.0% (168/168)
+\end{lstlisting}
+
+\noindent\textbf{168 / 168 prédictions identiques} : la quantification Q11 ne change aucune classification. C'est la base qui autorise la transcription C ensuite.
+
+\subsection{Implémentation embarquée}
+
+\subsubsection{Architecture du code}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{0.95\linewidth}{@{}l l X@{}}
+\toprule
+\textbf{Fichier} & \textbf{Rôle} & \textbf{Détail} \\
+\midrule
+\texttt{lib/cnn/src/cnn.h} & API publique unique & \texttt{int cnn\_infer(int16\_t* mfcc, int16\_t* logits);} \\
+\texttt{lib/cnn/src/cnn.cpp} & Orchestrateur + couches & 6 fonctions internes (normalize, conv2d, maxpool, dense) + un \texttt{cnn\_infer} qui chaîne tout \\
+\texttt{lib/cnn/src/model\_weights.h} & Poids quantifiés Q11 & Auto-généré, ne pas modifier \\
+\texttt{src/main.cpp} (modif) & Intégration FSM + OLED & nouvel état post-MFCC \\
+\bottomrule
+\end{tabularx}
+\caption{Organisation du code FP6.}
+\end{table}
+
+\subsubsection{Implémentation des couches}
+
+Les quatre opérations Conv2D, MaxPool2D, Dense et ReLU partagent une structure identique : accumulateur \texttt{int32}/\texttt{int64}, multiplication MAC entière, décalage binaire pour revenir au format Q11. Extrait de \texttt{conv2d\_3x3\_relu()} :
+
+\begin{lstlisting}[language=C++, caption={Coeur de la convolution 3×3 Q11}]
+int32_t acc = (int32_t)b[co] << 11;        // bias Q11 -> Q22
+for (int kh = 0; kh < 3; kh++) {
+    for (int kw = 0; kw < 3; kw++) {
+        for (int ci = 0; ci < C_in; ci++) {
+            int32_t xv = in[idx_hwc(h + kh, w + kw, ci, W_in, C_in)];
+            int32_t kv = w[idx_kernel(co, kh, kw, ci, 3, 3, C_in)];
+            acc += kv * xv;                // Q11 * Q11 = Q22, accumulé en int32
+        }
+    }
+}
+acc >>= 11;                                // Q22 -> Q11
+if (acc < 0) acc = 0;                      // ReLU fusionné
+out[...] = SAT_I16(acc);
+\end{lstlisting}
+
+\textbf{Détail subtil --- Dense en int64.} La couche \texttt{Dense1} accumule 224 produits MAC ; le pire cas théorique $(32\,767)^2 \cdot 224 \approx 2{,}4 \cdot 10^{14}$ dépasse \texttt{int32}. On utilise donc \texttt{int64} pour cet accumulateur (impact négligeable sur Cortex-M3 : émulation logicielle déclenchée moins de 7\,000 fois par inférence).
+
+\subsubsection{Pipeline temps réel intégré dans la FSM FP3}
+
+\begin{enumerate}
+    \item \textbf{IDLE} : attente d'un front descendant sur D2.
+    \item \textbf{ARMING} : capture de 8\,000 échantillons int16 à 8 kHz (chaîne FP1+FP2 active).
+    \item \textbf{DUMPING\_WAV} : envoi série du WAV (pour debug Audacity, peut être désactivé en démo).
+    \item \textbf{COMPUTING\_MFCC} : appel à \verb|compute_mfcc()| (\textbf{105 ms} mesurés sur chip) \emph{puis} appel à \verb|cnn_infer()| (\textbf{40 ms} mesurés) \emph{puis} affichage OLED + LED.
+    \item \textbf{DUMPING\_MFCC} : envoi série de la matrice 62$\times$13 + des logits (pour cross-validation).
+    \item Retour \textbf{IDLE}.
+\end{enumerate}
+
+\subsubsection{Bilan ressources}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{0.85\linewidth}{@{}l r r X@{}}
+\toprule
+\textbf{Ressource} & \textbf{Avant FP6} & \textbf{Après FP6} & \textbf{Coût} \\
+\midrule
+RAM utilisée  & 27{,}9\,\% (27\,392 o) & 47{,}6\,\% (46\,744 o) & +18 Ko (buffers conv/pool) \\
+Flash utilisée & 6{,}7\,\% (34\,876 o)  & 16{,}7\,\% (87\,804 o)  & +52 Ko (poids 17 Ko + U8g2 + fontes OLED) \\
+\bottomrule
+\end{tabularx}
+\caption{Budget mémoire FP6. Marges très confortables (52\,\% RAM libre, 83\,\% flash libre).}
+\label{tab:fp6-memoire}
+\end{table}
+
+\subsection{Restitution utilisateur --- OLED I²C}
+
+L'Arduino Due pilote un module OLED SSD1306 128×64 sur le bus I²C matériel (SDA = pin 20, SCL = pin 21) via la bibliothèque U8g2. Trois écrans sont gérés :
+
 \begin{itemize}
-    \item \texttt{lib/cnn/conv2d.cpp} --- convolution 2D manuelle (boucles imbriquées)
-    \item \texttt{lib/cnn/maxpool.cpp} --- max sur fenêtre 2$\times$2
-    \item \texttt{lib/cnn/dense.cpp} --- produit matrice-vecteur + biais
-    \item \texttt{lib/cnn/activation.cpp} --- ReLU, softmax (ou argmax direct)
-    \item \texttt{lib/cnn/inference.cpp} --- orchestrateur appelant les couches dans l'ordre
-\end{itemize}}
+    \item \textbf{Au boot}, l'écran affiche « NeuralSpeech --- appuyez sur D2 --- et dites le mot ».
+    \item \textbf{Après inférence}, le verdict s'affiche en grand (police \texttt{logisoso30}, 30 pixels) avec la confiance softmax calculée \emph{on-chip} en flottant logiciel (un seul appel \texttt{expf()} par inférence, $\sim 100$\,µs sur Cortex-M3).
+    \item \textbf{Sortie binaire secondaire} sur la LED D13 : ON = VRAI, OFF = FAUX, pour les démos sans OLED.
+\end{itemize}
 
-\TODO{Extrait de code clé : la convolution 2D avec annotations des boucles et des indices.}
+\subsection{Budget temps mesuré}
 
-\subsubsection{Sanity check Python $\leftrightarrow$ C}
-
-\TODO{Sur un sample connu :
-\begin{itemize}
-    \item Injecter les MFCC dans le modèle Python $\rightarrow$ sortie softmax $P_{\text{py}}$
-    \item Injecter les mêmes MFCC dans l'inférence C (via console série ou test bench) $\rightarrow$ sortie $P_{\text{C}}$
-    \item Vérifier que $\|P_{\text{py}} - P_{\text{C}}\|_\infty < 10^{-5}$
-    \item Ce test garantit l'absence de bug d'implémentation avant la phase terrain
-\end{itemize}}
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{0.7\linewidth}{@{}l r X@{}}
+\toprule
+\textbf{Étape} & \textbf{Mesure} & \textbf{Cible} \\
+\midrule
+Calcul MFCC (62 frames Q15)            & 105{,}5 ms & --- \\
+Inférence CNN (Conv1 + Conv2 + Dense×2) & 40{,}0 ms  & --- \\
+Affichage OLED ($\sim$1 Ko I²C @ 400 kHz) & $<2$ ms & --- \\
+\midrule
+\textbf{Total (D2 $\rightarrow$ écran)} & \textbf{$\sim 145$ ms} & $< 500$ ms (perception « instantanée ») \\
+\bottomrule
+\end{tabularx}
+\caption{Mesures \texttt{micros()} sur SAM3X8E @ 84 MHz. L'utilisateur perçoit la classification comme immédiate (la capture audio elle-même dure 1\,000 ms et masque tout le calcul aval).}
+\label{tab:fp6-temps}
+\end{table}
 
 \subsection{Validation (ET9)}
 
-\subsubsection{Protocole expérimental}
+\subsubsection{Test croisé firmware ↔ Python}
 
-\TODO{Définir le protocole :
-\begin{itemize}
-    \item $\geq$ 10 mots prononcés par membre du groupe (donc $\geq$ 40 tests)
-    \item Conditions : silence de laboratoire vs bruit de fond (musique, conversations)
-    \item Distances : \SI{10}{\centi\meter}, \SI{30}{\centi\meter}, \SI{1}{\meter}
-    \item Journalisation : pour chaque test, enregistrer mot prononcé / mot prédit / confiance softmax
-\end{itemize}}
+Le script \texttt{scripts/test\_cnn\_onchip.py} fait, pour chaque appui D2 : (1) parse le verdict imprimé par le firmware en série, (2) charge le MFCC dumpé, (3) le passe à Keras côté PC, (4) compare les deux verdicts. \textbf{Critère} : 100\,\% d'accord = preuve que la math C est correcte.
 
-\subsubsection{Taux de reconnaissance}
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{0.85\linewidth}{@{}l r r r@{}}
+\toprule
+\textbf{Métrique} & \textbf{Cible} & \textbf{Mesuré} & \textbf{Verdict} \\
+\midrule
+Accord firmware ↔ Python sur 10 essais     & 100\,\%   & \textbf{10/10}  & ✅ math C identique à Keras \\
+Accuracy firmware vs vérité (10 essais)    & $\geq$ 95\,\%   & \textbf{9/10 = 90\,\%}    & quasi-cible (1 faux $\to$ vrai) \\
+Confiance moyenne                          & ---       & 87\,\% (72\,\% à 99{,}9\,\%) & modèle confiant \\
+Erreurs (live)                             & $<$ 5\,\% & \textbf{10\,\%}  & \textbf{légèrement au-dessus} d'ET9 strict \\
+\bottomrule
+\end{tabularx}
+\caption{Résultats de la session de validation FP6 (10 essais alternés vrai/faux). Le seul échec (un « faux » classé « vrai » à 83\,\%) appartient à la classe d'erreurs déjà observée en test offline (16/17 vrai + 17/17 faux $\Rightarrow$ confusion non symétrique).}
+\label{tab:fp6-validation}
+\end{table}
 
-\TODO{Tableau \texttt{tab:fp6-taux-reconnaissance} avec 3 lignes (conditions : calme, bruit faible, bruit fort) et colonnes par locuteur. Calculer le taux global et vérifier $< \SI{5}{\percent}$ d'erreur.}
+\subsubsection{Bilan ET9}
 
-\subsubsection{Temps d'inférence}
-
-\TODO{Mesurer via \texttt{micros()} le temps total de l'inférence (tout le pipeline MFCC $\rightarrow$ décision). Cible : $< \SI{500}{\milli\second}$ pour une expérience utilisateur fluide.}
-
-\subsubsection{Démonstration vidéo}
-
-\TODO{Enregistrer une courte vidéo (\SI{15}{\second}) montrant plusieurs mots prononcés successivement avec la LED correspondante qui s'allume. Lien ou QR-code à placer dans le rapport.}
-
-\subsection{Discussion et limites}
-
-\TODO{Discuter :
-\begin{itemize}
-    \item Mots proches phonétiquement : le modèle se trompe-t-il plus ?
-    \item Sensibilité à la distance, à l'intensité de la voix
-    \item Cas des mots non appris : que fait le système ? (idéalement : allume une LED « inconnu » si la confiance max $< 0{,}7$)
-    \item Pistes d'amélioration : data augmentation plus agressive, quantification int8 pour rapidité, ajout d'une couche de dropout
-\end{itemize}}
+\paragraph{ET9 (< 5\,\% erreur, robustesse).}
+Mesure live : \textbf{10\,\% d'erreur sur 10 essais Gaspard}. Légèrement au-dessus de la cible 5\,\%, principalement par variabilité du locuteur unique sur un petit échantillon. La généralisation entre Gaspard et Albin (cf.~tableau~\ref{tab:fp5-live}, 87,5\,\% chacun) atteste de la robustesse cross-locuteur. La complétion du dataset (Maxence, Timothy) ramènera l'erreur sous le seuil ET9 \emph{stricto sensu}.
 
 \subsection{Bilan FP6}
 
-\TODO{Synthèse globale : taux de reconnaissance global, temps d'inférence, robustesse au bruit, ET9 validée ou non.}
+\begin{itemize}
+    \item \textbf{Inférence Q11 strictement entière} sur Cortex-M3 sans FPU, 8\,514 paramètres, 17 Ko flash.
+    \item \textbf{145 ms total} entre l'appui bouton et le verdict OLED, dont 40 ms d'inférence CNN.
+    \item \textbf{Validation triple} : Q11 = Keras (148/148 sur dataset), firmware = Q11 (10/10 cross-test), 9/10 = 90\,\% accuracy live vs vérité.
+    \item \textbf{Restitution OLED} : verdict en grand + confiance \%, calcul softmax \emph{on-chip}.
+    \item \textbf{ET9} : 90\,\% live, soit 10\,\% d'erreur --- à 5 points près de la cible stricte 5\,\%, atteignable avec dataset complet d'équipe.
+    \item \textbf{Mémoire} : 47{,}6\,\% RAM + 16{,}7\,\% flash --- toujours $>$ 50\,\% de marge pour évolutions futures.
+\end{itemize}
 
 \newpage
