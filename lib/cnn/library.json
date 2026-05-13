@@ -1,0 +1,11 @@
+{
+  "name": "cnn",
+  "version": "1.0.0",
+  "description": "Embedded CNN inference in Q11 fixed-point for SAM3X8E",
+  "keywords": "cnn,ml,inference,q11,arduino-due",
+  "frameworks": "arduino",
+  "platforms": "atmelsam",
+  "build": {
+    "flags": ["-O2", "-std=c++17"]
+  }
+}

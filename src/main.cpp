@@ -33,8 +33,88 @@
  */
 
 #include <Arduino.h>
+#include <U8g2lib.h>         // FP6 affichage OLED I2C
+#include <math.h>            // expf() pour softmax (confiance affichée)
 #include "filter_coefs.h"   // FILTER_TAPS, FILTER_COEFS — généré par design_filter.py
 #include "mfcc.h"            // compute_mfcc(), MFCC_FRAMES, MFCC_COEFS
+#include "cnn.h"             // cnn_infer() — FP6 inférence Q11 embarquée
+
+// ---------------------------------------------------------------------------
+// FP6 — Configuration OLED
+// ---------------------------------------------------------------------------
+// Module supposé : SSD1306 128×64 I²C @ 0x3C, câblé sur :
+//   SDA → pin 20 (Due "SDA")
+//   SCL → pin 21 (Due "SCL")
+//   VCC → 3.3 V ou 5 V (selon module)
+//   GND → GND
+//
+// Si l'écran reste noir / affiche du bruit : c'est un SH1106. Remplacer par :
+//   U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
+//
+// Bibliothèque : olikraus/U8g2 (déclarée dans platformio.ini)
+// ---------------------------------------------------------------------------
+static U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
+
+/** Affiche "NeuralSpeech / Ready" en attente d'un appui sur D2. */
+static void oled_show_ready(void) {
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_8x13B_tf);
+    const char* t1 = "NeuralSpeech";
+    int w1 = u8g2.getStrWidth(t1);
+    u8g2.setCursor((128 - w1) / 2, 22);
+    u8g2.print(t1);
+    u8g2.setFont(u8g2_font_6x10_tf);
+    const char* t2 = "appuyez sur D2";
+    int w2 = u8g2.getStrWidth(t2);
+    u8g2.setCursor((128 - w2) / 2, 44);
+    u8g2.print(t2);
+    const char* t3 = "et dites le mot";
+    int w3 = u8g2.getStrWidth(t3);
+    u8g2.setCursor((128 - w3) / 2, 58);
+    u8g2.print(t3);
+    u8g2.sendBuffer();
+}
+
+/** Affiche le verdict VRAI/FAUX en grand + confiance softmax en bas. */
+static void oled_show_verdict(int verdict, const int16_t logits_q11[2]) {
+    // Softmax flottante : ~100 µs sur Cortex-M3 sans FPU (appelée une fois)
+    float l_v = (float)logits_q11[0] / 2048.0f;
+    float l_f = (float)logits_q11[1] / 2048.0f;
+    float e_v = expf(l_v);
+    float e_f = expf(l_f);
+    float sum = e_v + e_f;
+    float p_chosen = (verdict == CLASS_VRAI) ? (e_v / sum) : (e_f / sum);
+    int pct = (int)(p_chosen * 100.0f + 0.5f);
+
+    u8g2.clearBuffer();
+
+    // Bandeau haut : "NeuralSpeech"
+    u8g2.setFont(u8g2_font_6x10_tf);
+    const char* top = "NeuralSpeech";
+    int tw = u8g2.getStrWidth(top);
+    u8g2.setCursor((128 - tw) / 2, 10);
+    u8g2.print(top);
+
+    // Trait de séparation
+    u8g2.drawHLine(0, 13, 128);
+
+    // Mot prédit : énorme, centré
+    u8g2.setFont(u8g2_font_logisoso30_tf);
+    const char* word = (verdict == CLASS_VRAI) ? "VRAI" : "FAUX";
+    int ww = u8g2.getStrWidth(word);
+    u8g2.setCursor((128 - ww) / 2, 48);
+    u8g2.print(word);
+
+    // Confiance en bas
+    u8g2.setFont(u8g2_font_6x10_tf);
+    char buf[16];
+    snprintf(buf, sizeof(buf), "conf %d %%", pct);
+    int bw = u8g2.getStrWidth(buf);
+    u8g2.setCursor((128 - bw) / 2, 62);
+    u8g2.print(buf);
+
+    u8g2.sendBuffer();
+}
 
 // ---------------------------------------------------------------------------
 // Registres DWT Cortex-M3 (Data Watchpoint & Trace — Cycle Counter)
@@ -755,6 +835,17 @@ void setup(void)
 
     pinMode(BUTTON_PIN, INPUT_PULLUP);
 
+    // --- FP6 : LED interne D13 = sortie binaire secondaire ---
+    //   HIGH = VRAI, LOW = FAUX (au repos : LOW)
+    pinMode(LED_BUILTIN, OUTPUT);
+    digitalWrite(LED_BUILTIN, LOW);
+
+    // --- FP6 : OLED I²C — affichage VRAI/FAUX ---
+    Serial.print("OLED init... ");
+    u8g2.begin();
+    oled_show_ready();
+    Serial.println("OK (SSD1306 128x64 @ 0x3C)");
+
     configureADC();
     configureDAC();
     configureTC0();
@@ -883,16 +974,37 @@ void loop(void)
     bufTail = tail;
 
 #if !defined(FP1_PURE) || (FP1_PURE == 0)
-    // --- FP3_COMPUTING_MFCC : run MFCC on captureBuffer (blocking ~17 ms) ---
+    // --- FP3_COMPUTING_MFCC : run MFCC + FP6 inference on captureBuffer ---
     if (fp3State == FP3_COMPUTING_MFCC) {
-        // Flush adcBuffer to avoid overflow during the ~17 ms blocking compute
+        // Flush adcBuffer to avoid overflow during the ~17 + ~10 ms blocking compute
         NVIC_DisableIRQ(TC0_IRQn);
         bufTail = bufHead;
         NVIC_EnableIRQ(TC0_IRQn);
 
-        // captureBuffer holds 8000 int16 samples at 8 kHz (post-FP2 filtered).
-        // compute_mfcc does in-place preemphasis on its input, so we pass it directly.
+        // 1. MFCC : 8000 int16 audio -> 62x13 int16 matrix (~17 ms)
+        uint32_t t_mfcc_us = micros();
         compute_mfcc(captureBuffer, mfccMatrix);
+        t_mfcc_us = micros() - t_mfcc_us;
+
+        // 2. FP6 inférence CNN : 62x13 -> argmax(2 logits) (~10 ms attendu)
+        uint32_t t_cnn_us = micros();
+        int16_t cnn_logits[2];
+        int cnn_class = cnn_infer((const int16_t*)&mfccMatrix[0][0], cnn_logits);
+        t_cnn_us = micros() - t_cnn_us;
+
+        // 3. Action utilisateur : LED + OLED + log série
+        // LED_BUILTIN ON = VRAI, OFF = FAUX (mapping fixe, cohérent avec train_cnn.py)
+        digitalWrite(LED_BUILTIN, (cnn_class == CLASS_VRAI) ? HIGH : LOW);
+        oled_show_verdict(cnn_class, cnn_logits);
+
+        Serial.print("\n[FP6] === RESULTAT INFERENCE === ");
+        Serial.println((cnn_class == CLASS_VRAI) ? "VRAI" : "FAUX");
+        Serial.print("[FP6] logits Q11 : vrai="); Serial.print(cnn_logits[CLASS_VRAI]);
+        Serial.print(" faux="); Serial.println(cnn_logits[CLASS_FAUX]);
+        Serial.print("[FP6] timing : mfcc="); Serial.print(t_mfcc_us);
+        Serial.print(" us, cnn="); Serial.print(t_cnn_us);
+        Serial.print(" us, total="); Serial.print(t_mfcc_us + t_cnn_us);
+        Serial.println(" us");
 
         mfccDumpIdx = 0;
         fp3State = FP3_DUMPING_MFCC;

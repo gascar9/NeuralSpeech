@@ -112,6 +112,15 @@ def receive_mfcc(ser: serial.Serial, timeout_s: float = 5.0):
 
     # Wait for MFCC magic header
     raw = read_until(ser, MFCC_HEADER, timeout_s=timeout_s)
+    # FP6 : entre la fin du dump WAV et le header MFCC, le firmware print
+    # les lignes "[FP6] === RESULTAT INFERENCE === ..." + logits + timing.
+    # HEADER et MFCC_HEADER font tous deux 4 octets, donc extract_text_garbage
+    # (qui strip 4 octets en fin) marche pour les deux.
+    pre_mfcc_text = raw[:-len(MFCC_HEADER)].decode("utf-8", errors="replace").strip()
+    if pre_mfcc_text:
+        for line in pre_mfcc_text.splitlines():
+            if line.strip():
+                print(line)
 
     n_frames = struct.unpack("<I", ser.read(4))[0]
     n_coefs  = struct.unpack("<I", ser.read(4))[0]
